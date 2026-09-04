@@ -1,0 +1,87 @@
+name: Publish Gaming Article
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      category:
+        description: "Category id (leave blank for balanced rotation)"
+        required: false
+        default: ""
+      topic_id:
+        description: "Specific topic id to publish (overrides category)"
+        required: false
+        default: ""
+      publish_mode:
+        description: "Publish as draft or live"
+        required: false
+        default: "draft"
+        type: choice
+        options:
+          - draft
+          - live
+
+concurrency:
+  group: blogger-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Restore publication history
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: history-db-${{ github.run_id }}
+          restore-keys: |
+            history-db-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          missing=()
+          [ -z "${{ secrets.GEMINI_API_KEY }}" ] && missing+=("GEMINI_API_KEY")
+          [ -z "${{ secrets.BLOGGER_BLOG_ID }}" ] && missing+=("BLOGGER_BLOG_ID")
+          [ -z "${{ secrets.BLOGGER_CLIENT_ID }}" ] && missing+=("BLOGGER_CLIENT_ID")
+          [ -z "${{ secrets.BLOGGER_CLIENT_SECRET }}" ] && missing+=("BLOGGER_CLIENT_SECRET")
+          [ -z "${{ secrets.BLOGGER_REFRESH_TOKEN }}" ] && missing+=("BLOGGER_REFRESH_TOKEN")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Run publishing cycle
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
+          BLOGGER_CLIENT_ID: ${{ secrets.BLOGGER_CLIENT_ID }}
+          BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
+          BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+        run: |
+          ARGS=()
+          if [ -n "${{ github.event.inputs.category }}" ]; then
+            ARGS+=(--category "${{ github.event.inputs.category }}")
+          fi
+          if [ -n "${{ github.event.inputs.topic_id }}" ]; then
+            ARGS+=(--topic-id "${{ github.event.inputs.topic_id }}")
+          fi
+          if [ "${{ github.event.inputs.publish_mode }}" = "live" ]; then
+            ARGS+=(--live)
+          elif [ "${{ github.event.inputs.publish_mode }}" = "draft" ]; then
+            ARGS+=(--draft)
+          fi
+          python -m src.main run "${ARGS[@]}"

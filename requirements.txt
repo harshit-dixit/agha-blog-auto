@@ -1,0 +1,28 @@
+# Direct production and test dependencies, pinned to current stable releases.
+# Refresh these together after verifying the test suite and a draft publish run.
+
+# LLM & AI Generation
+google-genai==2.20.0
+
+# Feed Ingestion & Scraping
+feedparser==6.0.14
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.2
+
+# Google Blogger API & OAuth
+google-api-python-client==2.199.0
+google-auth-oauthlib==1.4.1
+google-auth-httplib2==0.4.2
+google-auth==2.57.0
+
+# Data Validation & Utilities
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+rich==15.0.0
+typer==0.27.1
+
+# Testing
+pytest==9.1.1
+pytest-mock==3.15.1

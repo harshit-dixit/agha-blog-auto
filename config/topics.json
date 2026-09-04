@@ -1,0 +1,314 @@
+{
+  "categories": {
+    "performance_optimization": {
+      "label": "Performance Optimization",
+      "description": "FPS boosts, lag reduction, thermal throttling fixes, and device-tuning guides that keep Android phones running games smoothly.",
+      "topics": [
+        {
+          "id": "perf-fps-boost-guide",
+          "title": "How to Boost FPS in Android Games: The Complete Performance Guide",
+          "primary_keyword": "boost fps android games",
+          "secondary_keywords": ["increase fps android", "android game fps drop fix", "gaming performance mode"],
+          "brief": "Explain GPU/CPU throttling, background app management, Game Mode toggles, and per-game graphics tuning to raise sustained FPS on mid-range and flagship phones."
+        },
+        {
+          "id": "perf-reduce-lag-guide",
+          "title": "How to Reduce Lag in Mobile Games: A Step-by-Step Fix Guide",
+          "primary_keyword": "reduce lag mobile games android",
+          "secondary_keywords": ["fix game lag android", "network lag vs device lag", "ping optimization mobile gaming"],
+          "brief": "Cover the difference between network lag, input lag, and rendering lag, with a diagnostic checklist and fixes for each."
+        },
+        {
+          "id": "perf-thermal-throttling-fix",
+          "title": "Fix Thermal Throttling During Gaming: Keep Your Android Phone Cool and Fast",
+          "primary_keyword": "fix thermal throttling android gaming",
+          "secondary_keywords": ["phone overheating while gaming", "android game performance drop heat", "cooling tips mobile gaming"],
+          "brief": "Explain why sustained gaming heats up SoCs, how throttling reduces clock speeds, and practical cooling/settings fixes including cooler fans and case removal."
+        },
+        {
+          "id": "perf-developer-options-gamers",
+          "title": "Best Developer Options Settings for Gamers on Android",
+          "primary_keyword": "developer options for gaming android",
+          "secondary_keywords": ["android developer options gaming settings", "disable animations android gaming", "force gpu rendering android"],
+          "brief": "Walk through enabling Developer Options and configuring animation scales, GPU rendering, and background process limits for gaming performance."
+        },
+        {
+          "id": "perf-ram-expansion-explained",
+          "title": "RAM Plus / Virtual RAM Expansion Explained: Pros, Cons, and Should Gamers Use It",
+          "primary_keyword": "ram plus virtual ram android gaming",
+          "secondary_keywords": ["extended ram pros and cons", "does ram plus help gaming", "virtual ram vs physical ram"],
+          "brief": "Explain how virtual RAM expansion works using storage as swap, its real-world impact on gaming multitasking, and when it helps versus hurts."
+        },
+        {
+          "id": "perf-best-gfx-tool-settings",
+          "title": "Best GFX Tool Settings for Smooth Gameplay on Any Android Device",
+          "primary_keyword": "best gfx tool settings android",
+          "secondary_keywords": ["gfx tool settings by device tier", "gfx tool resolution fps settings", "gfx tool for low end phones"],
+          "brief": "Provide tiered GFX Tool configuration recommendations (resolution, frame rate, graphics quality) for low-end, mid-range, and flagship devices."
+        },
+        {
+          "id": "perf-battery-vs-performance",
+          "title": "Battery Saver vs Performance Mode for Gaming: Which Should You Use?",
+          "primary_keyword": "battery saver vs performance mode gaming",
+          "secondary_keywords": ["gaming mode battery drain android", "best power mode for mobile gaming", "balance battery and fps android"],
+          "brief": "Compare how each power profile affects CPU/GPU clocks, screen brightness, and battery drain during gaming sessions, with recommendations by scenario."
+        },
+        {
+          "id": "perf-clear-cache-storage",
+          "title": "Clearing Cache and Storage the Right Way for Better Game Performance",
+          "primary_keyword": "clear cache android improve game performance",
+          "secondary_keywords": ["free up storage for gaming", "android storage full game lag", "cache vs data clearing games"],
+          "brief": "Explain the difference between clearing cache and clearing data, safe cleanup routines, and how low storage impacts game load times and stutter."
+        }
+      ]
+    },
+    "game_guides_walkthroughs": {
+      "label": "Game Guides & Walkthroughs",
+      "description": "Beginner-to-pro guides for popular Android titles like BGMI, Free Fire, Call of Duty Mobile, Genshin Impact, Minecraft PE, and Roblox.",
+      "topics": [
+        {
+          "id": "guide-bgmi-beginner-to-pro",
+          "title": "BGMI Beginner to Pro Guide: Master the Basics and Level Up Fast",
+          "primary_keyword": "bgmi beginner to pro guide",
+          "secondary_keywords": ["bgmi tips for beginners", "how to improve at bgmi", "bgmi rank push guide"],
+          "brief": "Cover core mechanics, loadout basics, and a progression path from bronze-level habits to competitive play."
+        },
+        {
+          "id": "guide-free-fire-beginner-to-pro",
+          "title": "Free Fire Beginner to Pro Guide: Tips, Strategy, and Rank Push",
+          "primary_keyword": "free fire beginner to pro guide",
+          "secondary_keywords": ["free fire tips for beginners", "free fire rank push tips", "free fire character combos"],
+          "brief": "Explain core Free Fire mechanics, character/skill combos, and a step-up strategy for climbing ranked tiers."
+        },
+        {
+          "id": "guide-cod-mobile-beginner-to-pro",
+          "title": "Call of Duty Mobile Beginner to Pro Guide: Loadouts, Maps, and Strategy",
+          "primary_keyword": "cod mobile beginner to pro guide",
+          "secondary_keywords": ["cod mobile loadout guide", "cod mobile tips for beginners", "cod mobile ranked strategy"],
+          "brief": "Walk through multiplayer basics, class/loadout building, and map-awareness tips that separate casual from competitive play."
+        },
+        {
+          "id": "guide-genshin-impact-beginner",
+          "title": "Genshin Impact Beginner's Guide: Everything New Travelers Need to Know",
+          "primary_keyword": "genshin impact beginner guide",
+          "secondary_keywords": ["genshin impact tips for new players", "genshin impact team building guide", "genshin impact early game priorities"],
+          "brief": "Cover exploration priorities, early team building, resin management, and common early-game mistakes to avoid."
+        },
+        {
+          "id": "guide-minecraft-pe-beginner",
+          "title": "Minecraft PE Beginner's Guide: Survival Basics Every Player Should Know",
+          "primary_keyword": "minecraft pe beginner guide",
+          "secondary_keywords": ["minecraft pocket edition survival tips", "minecraft pe first night guide", "minecraft pe crafting basics"],
+          "brief": "Cover first-night survival priorities, essential crafting recipes, and a roadmap from spawn to a sustainable base."
+        },
+        {
+          "id": "guide-roblox-beginner",
+          "title": "Roblox Beginner's Guide: Getting Started, Safety, and Popular Games to Try",
+          "primary_keyword": "roblox beginner guide",
+          "secondary_keywords": ["roblox tips for new players", "roblox account safety settings", "best roblox games to start with"],
+          "brief": "Explain account setup, parental/safety settings, Robux basics, and a curated list of beginner-friendly experiences."
+        },
+        {
+          "id": "guide-bgmi-sensitivity-settings",
+          "title": "Best BGMI Sensitivity Settings for Every Device: Full Breakdown",
+          "primary_keyword": "best bgmi sensitivity settings",
+          "secondary_keywords": ["bgmi sensitivity code", "bgmi gyroscope settings", "bgmi sensitivity for no recoil"],
+          "brief": "Provide a device-tier breakdown of camera, ADS, and gyroscope sensitivity values with an explanation of how each affects recoil control."
+        },
+        {
+          "id": "guide-free-fire-ranked-tips",
+          "title": "Free Fire Ranked Mode Tips: How to Climb from Bronze to Heroic",
+          "primary_keyword": "free fire ranked mode tips",
+          "secondary_keywords": ["free fire climb rank fast", "free fire heroic rank guide", "free fire ranked mistakes to avoid"],
+          "brief": "Break down rank tiers, point systems, and situational strategy for landing spots, rotations, and end-game positioning."
+        }
+      ]
+    },
+    "emulators_pc_gaming": {
+      "label": "Emulators & PC Gaming",
+      "description": "Setting up BlueStacks, LDPlayer, and Waydroid, plus keyboard mapping and high-FPS emulator configuration for playing Android games on PC.",
+      "topics": [
+        {
+          "id": "emu-bluestacks-setup-guide",
+          "title": "How to Set Up BlueStacks for Android Gaming on PC: Full Installation Guide",
+          "primary_keyword": "bluestacks setup guide android gaming",
+          "secondary_keywords": ["bluestacks installation pc", "bluestacks best settings for gaming", "bluestacks system requirements"],
+          "brief": "Walk through installation, first-run configuration, and performance settings tailored for gaming rather than general app use."
+        },
+        {
+          "id": "emu-ldplayer-setup-guide",
+          "title": "LDPlayer Setup Guide: Install and Optimize for Smooth Android Gaming",
+          "primary_keyword": "ldplayer setup guide android gaming",
+          "secondary_keywords": ["ldplayer installation pc", "ldplayer best settings", "ldplayer vs bluestacks"],
+          "brief": "Cover installation, CPU/RAM allocation, and resolution/FPS settings for a smooth LDPlayer gaming experience."
+        },
+        {
+          "id": "emu-waydroid-linux-setup",
+          "title": "How to Set Up Waydroid on Linux for Android Gaming",
+          "primary_keyword": "waydroid setup android gaming linux",
+          "secondary_keywords": ["waydroid installation guide", "waydroid gapps install", "waydroid gaming performance"],
+          "brief": "Explain Waydroid's container-based approach versus traditional emulators, installation steps, and GApps setup for gaming."
+        },
+        {
+          "id": "emu-keyboard-mapping-configs",
+          "title": "Best Keyboard Mapping Configs for Android Emulator Gaming",
+          "primary_keyword": "keyboard mapping android emulator gaming",
+          "secondary_keywords": ["emulator key mapping fps games", "custom keymap emulator android games", "bluestacks key mapping guide"],
+          "brief": "Provide practical key-binding layouts for shooter, MOBA, and battle royale titles across major emulators."
+        },
+        {
+          "id": "emu-120fps-emulator-settings",
+          "title": "Best 120 FPS Emulator Settings for Android Games on PC",
+          "primary_keyword": "120 fps emulator settings android games",
+          "secondary_keywords": ["high fps emulator settings", "unlock 120fps emulator", "emulator graphics settings for high refresh rate"],
+          "brief": "Explain the hardware/software requirements to unlock high frame rates in emulators and how to configure engine and emulator settings together."
+        },
+        {
+          "id": "emu-bluestacks-vs-ldplayer",
+          "title": "BlueStacks vs LDPlayer: Which Android Emulator Is Better for Gaming?",
+          "primary_keyword": "bluestacks vs ldplayer gaming",
+          "secondary_keywords": ["best android emulator for gaming pc", "bluestacks ldplayer comparison", "lightest android emulator gaming"],
+          "brief": "Compare performance, resource usage, feature sets, and compatibility to help readers pick the right emulator for their PC."
+        },
+        {
+          "id": "emu-gamepad-emulator-setup",
+          "title": "How to Use a Gamepad with Android Emulators for PC Gaming",
+          "primary_keyword": "gamepad android emulator setup",
+          "secondary_keywords": ["controller support bluestacks ldplayer", "map controller to emulator games", "best controller settings emulator"],
+          "brief": "Cover controller pairing, driver considerations, and per-game controller mapping inside popular emulators."
+        },
+        {
+          "id": "emu-multi-instance-emulator-guide",
+          "title": "Multi-Instance Emulator Guide: Run Multiple Android Games or Accounts on PC",
+          "primary_keyword": "multi instance emulator android games",
+          "secondary_keywords": ["multi instance manager bluestacks", "run two game accounts pc", "multi instance sync setup"],
+          "brief": "Explain multi-instance managers, synced input for multi-accounting, and hardware requirements to run instances smoothly."
+        }
+      ]
+    },
+    "android_gaming_tools": {
+      "label": "Android Gaming Tools",
+      "description": "Game Space features, high-FPS screen recording setups, Bluetooth controller pairing, and other built-in and third-party gaming utilities.",
+      "topics": [
+        {
+          "id": "tools-game-space-features-guide",
+          "title": "Android Game Space Features Explained: A Complete Walkthrough",
+          "primary_keyword": "android game space features guide",
+          "secondary_keywords": ["game space settings explained", "samsung game booster guide", "miui game turbo guide"],
+          "brief": "Cover the common Game Space/Game Booster features across major Android skins and how to configure each for competitive play."
+        },
+        {
+          "id": "tools-screen-recording-highfps",
+          "title": "How to Record Android Gameplay in High FPS Without Lag",
+          "primary_keyword": "high fps screen recording android gaming",
+          "secondary_keywords": ["record gameplay android no lag", "best screen recorder settings gaming", "60fps screen recording android"],
+          "brief": "Explain bitrate, resolution, and frame rate trade-offs for smooth capture, plus settings to avoid dropped frames during recording."
+        },
+        {
+          "id": "tools-bluetooth-controller-pairing",
+          "title": "Bluetooth Controller Pairing and Mapping Guide for Android Games",
+          "primary_keyword": "bluetooth controller android gaming setup",
+          "secondary_keywords": ["pair controller android games", "controller button mapping android", "best bluetooth controllers android gaming"],
+          "brief": "Walk through pairing steps for common controllers, native vs third-party mapping apps, and troubleshooting connection drops."
+        },
+        {
+          "id": "tools-game-turbo-settings",
+          "title": "Game Turbo / Game Booster Settings Every Android Gamer Should Enable",
+          "primary_keyword": "game turbo settings android",
+          "secondary_keywords": ["game booster best settings", "focus mode gaming android", "block notifications while gaming"],
+          "brief": "Detail the performance, focus, and notification-blocking settings inside Game Turbo/Booster apps and when to use each."
+        },
+        {
+          "id": "tools-diy-macro-tools-android",
+          "title": "Auto-Clicker and Macro Tools for Android Gaming: What's Safe to Use",
+          "primary_keyword": "auto clicker macro tools android gaming",
+          "secondary_keywords": ["safe macro apps android", "auto clicker ban risk games", "gaming automation tools android"],
+          "brief": "Explain legitimate accessibility-based automation versus tools that risk account bans, with guidance on safe use cases."
+        },
+        {
+          "id": "tools-live-streaming-mobile-games",
+          "title": "How to Live Stream Mobile Games from Android: Setup Guide",
+          "primary_keyword": "live stream mobile games android",
+          "secondary_keywords": ["stream android games to youtube", "mobile game streaming setup", "best streaming apps android gaming"],
+          "brief": "Cover streaming app setup, bitrate/resolution settings for stable streams, and tips for maintaining performance while streaming."
+        },
+        {
+          "id": "tools-notification-blocking-gaming",
+          "title": "How to Block Notifications and Distractions While Gaming on Android",
+          "primary_keyword": "block notifications while gaming android",
+          "secondary_keywords": ["do not disturb gaming android", "gaming focus mode setup", "stop pop ups during games"],
+          "brief": "Explain Do Not Disturb, per-app notification rules, and gaming-mode auto-reply features to stay distraction-free."
+        },
+        {
+          "id": "tools-custom-touch-controls",
+          "title": "Customizing Touch Controls for Better Precision in Android Games",
+          "primary_keyword": "custom touch controls android gaming",
+          "secondary_keywords": ["custom hud layout mobile games", "touch sensitivity precision gaming", "best control layout mobile shooters"],
+          "brief": "Cover in-game HUD customization options and third-party overlay tools for improving touch precision in shooters and action games."
+        }
+      ]
+    },
+    "troubleshooting": {
+      "label": "Troubleshooting",
+      "description": "Fixes for game crashes, 'App Not Installed' errors, OBB installation problems, and Google Play Services issues.",
+      "topics": [
+        {
+          "id": "fix-game-crash-android",
+          "title": "How to Fix Android Games That Keep Crashing: Complete Troubleshooting Guide",
+          "primary_keyword": "fix android game keeps crashing",
+          "secondary_keywords": ["game crashes on startup android", "game force closes fix", "android game crash troubleshooting"],
+          "brief": "Provide a systematic troubleshooting flow from cache clearing to storage, RAM, and OS-update checks for crash-prone games."
+        },
+        {
+          "id": "fix-app-not-installed-error",
+          "title": "How to Fix the 'App Not Installed' Error on Android Games",
+          "primary_keyword": "fix app not installed error android",
+          "secondary_keywords": ["app not installed apk error", "app not installed parse error fix", "install blocked android games"],
+          "brief": "Explain the common causes (corrupted APK, signature mismatch, insufficient storage, blocked installs) and a fix for each."
+        },
+        {
+          "id": "fix-obb-installation-guide",
+          "title": "How to Install OBB Files for Android Games: Step-by-Step Guide",
+          "primary_keyword": "install obb files android games",
+          "secondary_keywords": ["obb file not found error", "obb folder location android", "game data files not loading fix"],
+          "brief": "Explain what OBB files are, correct folder placement per Android version, and fixes for 'additional data not found' errors."
+        },
+        {
+          "id": "fix-google-play-services-errors",
+          "title": "How to Fix Google Play Services Errors That Break Your Games",
+          "primary_keyword": "fix google play services error games",
+          "secondary_keywords": ["google play services keeps stopping", "play services update error games", "google play games sign in error"],
+          "brief": "Cover common Play Services errors affecting sign-in, achievements, and cloud saves, with update/cache/reset fixes for each."
+        },
+        {
+          "id": "fix-game-wont-launch",
+          "title": "Android Game Won't Launch or Open? Here's How to Fix It",
+          "primary_keyword": "android game wont launch fix",
+          "secondary_keywords": ["game not opening android", "game stuck on loading screen fix", "game closes immediately after opening"],
+          "brief": "Provide a diagnostic checklist covering compatibility, storage space, background conflicts, and reinstall procedures."
+        },
+        {
+          "id": "fix-lag-spikes-online-games",
+          "title": "How to Fix Lag Spikes in Online Android Games",
+          "primary_keyword": "fix lag spikes online android games",
+          "secondary_keywords": ["ping spikes mobile games fix", "wifi lag while gaming android", "reduce packet loss mobile gaming"],
+          "brief": "Explain how to diagnose network versus device-side lag spikes and fixes including DNS, Wi-Fi band, and background data limits."
+        },
+        {
+          "id": "fix-controller-not-detected",
+          "title": "Bluetooth Controller Not Detected on Android? Here's the Fix",
+          "primary_keyword": "bluetooth controller not detected android",
+          "secondary_keywords": ["controller not connecting android games", "controller paired but not working game", "fix controller input lag android"],
+          "brief": "Cover pairing resets, per-game controller support checks, and driver/compatibility issues that block controller detection."
+        },
+        {
+          "id": "fix-black-screen-game-launch",
+          "title": "Fix Black Screen When Launching Android Games",
+          "primary_keyword": "fix black screen android game launch",
+          "secondary_keywords": ["game black screen after loading", "game screen freezes on launch", "black screen crash mobile game"],
+          "brief": "Explain GPU driver, graphics API compatibility, and cache-related causes of black-screen launches, with fixes for each."
+        }
+      ]
+    }
+  }
+}
