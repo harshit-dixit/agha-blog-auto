@@ -104,46 +104,83 @@ class AN1Scraper:
         slug = url.split("/")[-1].replace(".html", "")
         return slug
 
+    def _extract_next_page_url(self, soup: BeautifulSoup, current_url: str) -> Optional[str]:
+        """Extract next page URL from navigation or pagination elements."""
+        nav_more = soup.select_one("div.nav_more a")
+        if nav_more and nav_more.get("href"):
+            return urllib.parse.urljoin(current_url, nav_more["href"])
+
+        next_arrow = soup.select_one("div.navigation_ext a:has(svg.i__arrowright)")
+        if next_arrow and next_arrow.get("href"):
+            return urllib.parse.urljoin(current_url, next_arrow["href"])
+
+        for a in soup.select("div.navigation a, div.pagination a"):
+            text = a.get_text(strip=True).lower()
+            if "next" in text or "more" in text:
+                href = a.get("href")
+                if href:
+                    return urllib.parse.urljoin(current_url, href)
+
+        return None
+
     def fetch_latest_post_urls(
         self,
         limit: int = 20,
         sources: Optional[list[str]] = None,
+        max_pages_per_source: int = 10,
     ) -> list[str]:
-        """Fetch unique latest post URLs from key AN1 pages."""
+        """Fetch unique latest post URLs from key AN1 pages with pagination support.
+
+        Defaults to crawling the modded APKs tag page (https://an1.com/tags/mods/).
+        """
         if sources is None:
             sources = [
-                f"{self.base_url}/",
-                f"{self.base_url}/games/",
-                f"{self.base_url}/programmy/",
+                f"{self.base_url}/tags/mods/",
             ]
 
         discovered_urls: list[str] = []
         seen: set[str] = set()
 
         for source_url in sources:
-            if self.request_delay > 0 and seen:
-                time.sleep(self.request_delay)
+            current_url: Optional[str] = source_url
+            page_count = 0
 
-            try:
-                resp = self.session.get(source_url, timeout=self.timeout)
-                resp.raise_for_status()
-            except requests.RequestException as exc:
-                logger.warning("Failed to fetch discovery page %s: %s", source_url, exc)
-                continue
+            while current_url and len(discovered_urls) < limit and page_count < max_pages_per_source:
+                if self.request_delay > 0 and (seen or page_count > 0):
+                    time.sleep(self.request_delay)
 
-            soup = BeautifulSoup(resp.text, "lxml")
-            links = soup.select("div.data div.name a, div.item_app div.name a, div.app_list div.name a")
-            for link in links:
-                href = link.get("href")
-                if not href:
-                    continue
-                full_url = urllib.parse.urljoin(self.base_url, href)
-                if re.search(r"/\d+-[^/]+\.html$", full_url):
-                    if full_url not in seen:
-                        seen.add(full_url)
-                        discovered_urls.append(full_url)
-                        if len(discovered_urls) >= limit:
-                            return discovered_urls
+                page_count += 1
+                try:
+                    resp = self.session.get(current_url, timeout=self.timeout)
+                    resp.raise_for_status()
+                except requests.RequestException as exc:
+                    logger.warning("Failed to fetch discovery page %s: %s", current_url, exc)
+                    break
+
+                soup = BeautifulSoup(resp.text, "lxml")
+                links = soup.select("div.data div.name a, div.item_app div.name a, div.app_list div.name a")
+                new_links_on_page = 0
+
+                for link in links:
+                    href = link.get("href")
+                    if not href:
+                        continue
+                    full_url = urllib.parse.urljoin(self.base_url, href)
+                    if re.search(r"/\d+-[^/]+\.html$", full_url):
+                        if full_url not in seen:
+                            seen.add(full_url)
+                            discovered_urls.append(full_url)
+                            new_links_on_page += 1
+                            if len(discovered_urls) >= limit:
+                                return discovered_urls
+
+                if new_links_on_page == 0:
+                    break
+
+                next_url = self._extract_next_page_url(soup, current_url)
+                if not next_url or next_url == current_url:
+                    break
+                current_url = next_url
 
         return discovered_urls
 

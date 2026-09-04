@@ -21,6 +21,11 @@ on:
         options:
           - live
           - draft
+      source_url:
+        description: "AN1 tag or category page to crawl (defaults to https://an1.com/tags/mods/)"
+        required: false
+        default: ""
+
 
 concurrency:
   group: an1-publisher
@@ -76,8 +81,12 @@ jobs:
             python -m src.main an1-post "${{ github.event.inputs.post_url }}" $MODE_FLAG
           else
             LIMIT="${{ github.event.inputs.limit || '1' }}"
+            SOURCE_FLAG=""
+            if [ -n "${{ github.event.inputs.source_url }}" ]; then
+              SOURCE_FLAG="--source ${{ github.event.inputs.source_url }}"
+            fi
             echo "Syncing new posts from AN1.com (limit: $LIMIT)..."
-            python -m src.main an1-sync --limit "$LIMIT" $MODE_FLAG
+            python -m src.main an1-sync --limit "$LIMIT" $MODE_FLAG $SOURCE_FLAG
           fi
 
       - name: Commit and push publication ledger

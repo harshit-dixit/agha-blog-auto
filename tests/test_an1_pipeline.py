@@ -340,3 +340,85 @@ def test_sync_stays_green_when_backlog_is_simply_empty(tmp_path: Path, sample_po
 
     assert result.exit_code == 0
     assert "No new unpublished posts" in result.output
+
+
+def test_fetch_latest_post_urls_defaults_to_tags_mods():
+    scraper = AN1Scraper(request_delay=0)
+    page_html = """
+    <html><body>
+    <div class="data"><div class="name"><a href="/1001-mod-game-1.html">Game 1 (MOD)</a></div></div>
+    <div class="data"><div class="name"><a href="/1002-mod-game-2.html">Game 2 (MOD)</a></div></div>
+    </body></html>
+    """
+    mock_resp = MagicMock(status_code=200, text=page_html)
+
+    with patch.object(scraper.session, "get", return_value=mock_resp) as mock_get:
+        urls = scraper.fetch_latest_post_urls(limit=10)
+
+    assert mock_get.call_count == 1
+    assert mock_get.call_args[0][0] == "https://an1.com/tags/mods/"
+    assert urls == [
+        "https://an1.com/1001-mod-game-1.html",
+        "https://an1.com/1002-mod-game-2.html",
+    ]
+
+
+def test_fetch_latest_post_urls_paginates_when_limit_exceeds_single_page():
+    scraper = AN1Scraper(request_delay=0)
+    page1_html = """
+    <html><body>
+    <div class="data"><div class="name"><a href="/1001-mod-game-1.html">Game 1 (MOD)</a></div></div>
+    <div class="data"><div class="name"><a href="/1002-mod-game-2.html">Game 2 (MOD)</a></div></div>
+    <div class="nav_more"><a href="https://an1.com/tags/mods/page/2/">More...</a></div>
+    </body></html>
+    """
+    page2_html = """
+    <html><body>
+    <div class="data"><div class="name"><a href="/1003-mod-game-3.html">Game 3 (MOD)</a></div></div>
+    <div class="data"><div class="name"><a href="/1004-mod-game-4.html">Game 4 (MOD)</a></div></div>
+    </body></html>
+    """
+
+    def mock_get(url, *args, **kwargs):
+        resp = MagicMock(status_code=200)
+        resp.text = page2_html if "page/2" in url else page1_html
+        return resp
+
+    with patch.object(scraper.session, "get", side_effect=mock_get) as mock_get_spy:
+        urls = scraper.fetch_latest_post_urls(limit=3)
+
+    assert mock_get_spy.call_count == 2
+    assert len(urls) == 3
+    assert urls == [
+        "https://an1.com/1001-mod-game-1.html",
+        "https://an1.com/1002-mod-game-2.html",
+        "https://an1.com/1003-mod-game-3.html",
+    ]
+
+
+def test_fetch_latest_post_urls_honors_custom_sources():
+    scraper = AN1Scraper(request_delay=0)
+    page_html = """
+    <html><body>
+    <div class="data"><div class="name"><a href="/2001-custom-game.html">Custom Game</a></div></div>
+    </body></html>
+    """
+    mock_resp = MagicMock(status_code=200, text=page_html)
+
+    with patch.object(scraper.session, "get", return_value=mock_resp) as mock_get:
+        urls = scraper.fetch_latest_post_urls(limit=5, sources=["https://an1.com/games/"])
+
+    assert mock_get.call_count == 1
+    assert mock_get.call_args[0][0] == "https://an1.com/games/"
+    assert urls == ["https://an1.com/2001-custom-game.html"]
+
+
+def test_cli_an1_sync_passes_custom_source(tmp_path: Path):
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=[]) as mock_fetch, \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--dry-run", "--source", "https://an1.com/custom-tag/"])
+
+    assert result.exit_code == 0
+    mock_fetch.assert_called_once_with(limit=40, sources=["https://an1.com/custom-tag/"])
+

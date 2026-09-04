@@ -220,6 +220,9 @@ def an1_sync(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Scrape and format without publishing."
     ),
+    source: Optional[str] = typer.Option(
+        None, "--source", "-s", help="Custom AN1 page or tag URL to crawl (defaults to https://an1.com/tags/mods/)."
+    ),
 ) -> None:
     """Discover newly published posts on AN1.com and publish them to Blogger."""
     settings = get_settings()
@@ -228,7 +231,8 @@ def an1_sync(
     formatter = AN1Formatter(settings=settings)
 
     with console.status("Checking AN1.com for latest posts..."):
-        discovered_urls = scraper.fetch_latest_post_urls(limit=40)
+        sources = [source] if source else None
+        discovered_urls = scraper.fetch_latest_post_urls(limit=40, sources=sources)
 
     if not discovered_urls:
         console.print(Panel("Could not discover posts from AN1.com.", style="yellow"))
