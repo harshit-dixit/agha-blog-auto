@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
-from typing import Optional
+from typing import Optional, Sequence
 
 from google import genai
 from google.genai import types
@@ -16,12 +17,26 @@ logger = logging.getLogger(__name__)
 # Minimum usable length for generated prose; shorter output means the model bailed out.
 MIN_ENHANCED_LENGTH = 200
 
+# Ceiling for a batched reply. Four-paragraph reviews run 550-800 tokens each once the
+# HTML is JSON-escaped, so this is the headroom that keeps a small batch from truncating.
+BATCH_MAX_OUTPUT_TOKENS = 8192
+
 
 class ContentEnhancementError(RuntimeError):
     """Raised when Gemini is configured but could not produce usable original prose.
 
     Publishing the scraped description verbatim is the failure mode this guards against,
     so callers should skip the post rather than fall back to it.
+    """
+
+
+class QuotaExhaustedError(ContentEnhancementError):
+    """Raised when Gemini refuses the request because the API quota is spent.
+
+    This is a run-level condition, not a per-post one: every later call in the same run
+    fails the same way, so callers should stop generating instead of walking the rest of
+    the backlog burning requests. Subclasses ContentEnhancementError so existing per-post
+    handlers still treat it as a skip.
     """
 
 
@@ -45,6 +60,31 @@ INSTRUCTIONS:
 3. Output format: Return ONLY the paragraphs wrapped in clean HTML <p>...</p> tags.
 4. Do NOT include markdown fences, <html>, <body>, <h1>, or download links (these are handled by the template).
 5. Ensure the text is 100% original and natural (not a regurgitation of the scraped summary)."""
+
+# Reviews for several posts in one request. The free tier's binding limit is a per-day
+# request count (20/day/model), not a per-minute rate, so how many calls a run makes
+# matters far more than how fast it makes them.
+GEMINI_BATCH_PROMPT = """You are a senior gaming journalist and app reviewer for Android Game Hack Area.
+Write an original app review for EACH of the {count} Android games listed below.
+
+{app_blocks}
+
+INSTRUCTIONS (apply to every review independently):
+1. Write 3-4 detailed paragraphs covering:
+   - Introduction: what the game is, its premise, why it's popular, and what makes it fun.
+   - Core Mechanics & Gameplay: controls, graphics, atmosphere, game modes, progression.
+   - MOD Highlights: what that entry's listed mod features unlock and how they change play.
+   - Player Tips: 2-3 helpful strategies or settings recommendations.
+2. Tone: engaging, technical yet accessible, gamer-friendly.
+3. Write each review fresh for its own game. Do NOT reuse opening phrases, sentence
+   structures, or stock transitions between entries - these posts are published side by
+   side, so repeated phrasing is obvious to both readers and search engines.
+4. Every review must be 100% original, not a rewording of that game's scraped summary.
+5. Return ONLY a JSON array - no markdown fences, no commentary - shaped exactly like:
+   [{{"post_id": "<the id given for that game>", "review_html": "<p>...</p><p>...</p>"}}]
+6. review_html must contain only <p>...</p> paragraphs: no markdown, no <html>, <body> or
+   <h1> tags, and no download links (the template adds those).
+7. Return exactly one entry per game, reusing the exact post_id given for that game."""
 
 
 class AN1Formatter:
@@ -81,6 +121,34 @@ class AN1Formatter:
         labels.append("Direct Download")
         return list(dict.fromkeys(labels))[:8]
 
+    @property
+    def gemini_enabled(self) -> bool:
+        """True when a Gemini client was built, so original prose can be generated."""
+        return self._genai_client is not None
+
+    @staticmethod
+    def _is_quota_error(exc: Exception) -> bool:
+        """Detect quota exhaustion (HTTP 429 / RESOURCE_EXHAUSTED) in an SDK exception.
+
+        Checked structurally first, then against the message, because the SDK surfaces
+        the same condition through several exception shapes depending on transport.
+        """
+        if getattr(exc, "code", None) == 429 or getattr(exc, "status_code", None) == 429:
+            return True
+        status = getattr(exc, "status", "")
+        if isinstance(status, str) and status.upper() == "RESOURCE_EXHAUSTED":
+            return True
+        text = str(exc).upper()
+        return "RESOURCE_EXHAUSTED" in text or "429" in text
+
+    @classmethod
+    def _generation_error(cls, subject: str, exc: Exception) -> ContentEnhancementError:
+        """Wrap an SDK failure, tagging quota exhaustion so callers can stop the run."""
+        message = f"Gemini enhancement failed for {subject}: {exc}"
+        if cls._is_quota_error(exc):
+            return QuotaExhaustedError(message)
+        return ContentEnhancementError(message)
+
     def _enhance_with_gemini(self, post: AN1Post) -> Optional[str]:
         """Generate original review prose via Gemini.
 
@@ -111,9 +179,7 @@ class AN1Formatter:
             )
             raw_text = response.text or ""
         except Exception as exc:
-            raise ContentEnhancementError(
-                f"Gemini enhancement failed for {post.app_name!r}: {exc}"
-            ) from exc
+            raise self._generation_error(repr(post.app_name), exc) from exc
 
         text = self._normalize_enhanced_text(raw_text)
         if not text:
@@ -137,7 +203,118 @@ class AN1Formatter:
             return None
         return text
 
-    def format_html(self, post: AN1Post) -> str:
+    def enhance_batch(self, posts: Sequence[AN1Post]) -> dict[str, str]:
+        """Generate review prose for several posts in a single Gemini request.
+
+        Returns a {post_id: paragraph_html} map covering only the entries that came back
+        usable. Callers must skip any post missing from the map rather than publishing its
+        scraped description - a skipped post stays in the backlog and is retried next run,
+        which costs a delay instead of a thin duplicate-content page. Returns an empty map
+        when Gemini is not configured.
+
+        Raises QuotaExhaustedError when the API is out of quota (the caller should stop
+        generating) and ContentEnhancementError for any other failure (skip this batch).
+        """
+        if not self.gemini_enabled or not self.settings or not posts:
+            return {}
+
+        blocks = []
+        for index, post in enumerate(posts, start=1):
+            blocks.append(
+                "\n".join(
+                    (
+                        f"GAME {index}",
+                        f"post_id: {post.post_id}",
+                        f"App Name: {post.app_name}",
+                        f"Version: {post.version}",
+                        f"Developer: {post.developer}",
+                        f"Category: {', '.join(post.categories)}",
+                        f"Mod Features: {post.mod_features}",
+                        f"Scraped Summary: {post.description_text}",
+                    )
+                )
+            )
+        prompt = GEMINI_BATCH_PROMPT.format(count=len(posts), app_blocks="\n\n".join(blocks))
+
+        try:
+            response = self._genai_client.models.generate_content(
+                model=self.settings.GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,
+                    response_mime_type="application/json",
+                    max_output_tokens=BATCH_MAX_OUTPUT_TOKENS,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+            raw_text = response.text or ""
+        except Exception as exc:
+            subject = f"batch of {len(posts)} ({', '.join(p.app_name for p in posts)})"
+            raise self._generation_error(subject, exc) from exc
+
+        wanted = {post.post_id: post for post in posts}
+        results: dict[str, str] = {}
+        for item in self._parse_batch_items(raw_text):
+            post_id = str(item.get("post_id", "")).strip()
+            if post_id not in wanted or post_id in results:
+                continue
+            text = self._normalize_enhanced_text(str(item.get("review_html") or ""))
+            if text:
+                results[post_id] = text
+
+        missing = [post.app_name for pid, post in wanted.items() if pid not in results]
+        if missing:
+            logger.warning(
+                "Gemini batch returned no usable prose for %d of %d post(s): %s",
+                len(missing),
+                len(posts),
+                ", ".join(missing),
+            )
+        if not results:
+            raise ContentEnhancementError(
+                f"Gemini batch returned no usable reviews for any of the {len(posts)} "
+                f"post(s) ({len(raw_text.strip())} chars returned)"
+            )
+        return results
+
+    @staticmethod
+    def _parse_batch_items(raw_text: str) -> list[dict]:
+        """Parse a batch reply into entries, salvaging whole ones from a truncated array.
+
+        A cut-off or malformed reply should cost only the entries it actually mangled, so
+        the fallback pass recovers every complete JSON object it can find instead of
+        discarding the whole batch.
+        """
+        text = raw_text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        if start > 0:
+            text = text[start:]
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            # Some replies wrap the array in a single key, e.g. {"reviews": [...]}.
+            for value in parsed.values():
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+            return [parsed]
+
+        items: list[dict] = []
+        for match in re.finditer(r"\{[^{}]*\}", text, re.S):
+            try:
+                candidate = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                items.append(candidate)
+        return items
+
+    def format_html(self, post: AN1Post, enhanced_desc: Optional[str] = None) -> str:
         """Generate modern, fully responsive, standalone-styled HTML for Blogger post body."""
         app_name = html.escape(post.app_name)
         developer = html.escape(post.developer)
@@ -207,9 +384,11 @@ class AN1Formatter:
             </div>
             """
 
-        # Original prose from Gemini when configured; the scraped-text fallback below is
-        # only reached when no Gemini key is set (a failed generation raises instead).
-        enhanced_desc = self._enhance_with_gemini(post)
+        # Original prose either arrives pre-generated from a batch call upstream, or is
+        # generated per-post here. The scraped-text fallback below is only reached when no
+        # Gemini key is set (a failed generation raises instead).
+        if enhanced_desc is None:
+            enhanced_desc = self._enhance_with_gemini(post)
         if enhanced_desc:
             desc_formatted = enhanced_desc
         else:

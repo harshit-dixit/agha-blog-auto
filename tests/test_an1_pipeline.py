@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from src.db.history import HistoryDB
-from src.generators.an1_formatter import AN1Formatter, ContentEnhancementError
+from src.generators.an1_formatter import (
+    AN1Formatter,
+    ContentEnhancementError,
+    QuotaExhaustedError,
+)
 from src.main import app
 from src.scrapers.an1_scraper import (
     AN1Post,
@@ -519,6 +523,7 @@ def test_cli_an1_sync_defaults_to_limit_10_and_handles_fewer_new_posts(tmp_path:
          patch("src.main.AN1Scraper.scrape_post", side_effect=mock_scrape), \
          patch("src.main.AN1Scraper.validate_post"), \
          patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=False), \
          patch("src.main.AN1Formatter.format_html", return_value="<p>Review content</p>"), \
          patch("src.main.DB_PATH", db_path):
         result = runner.invoke(app, ["an1-sync", "--dry-run"])
@@ -530,3 +535,264 @@ def test_cli_an1_sync_defaults_to_limit_10_and_handles_fewer_new_posts(tmp_path:
     assert "Successfully processed 1 AN1 post(s)" in result.stdout
 
 
+def _batch_posts(count: int) -> list[AN1Post]:
+    """Build `count` minimal, distinct posts for batch-generation tests."""
+    return [
+        AN1Post(
+            post_id=str(2000 + i),
+            url=f"https://an1.com/{2000 + i}-game-{i}.html",
+            title=f"Game {i} (MOD, Unlimited Coins)",
+            app_name=f"Game {i}",
+            icon_url="https://an1.com/img.png",
+            developer="Dev",
+            categories=["Action"],
+            version="1.0",
+            android_version="5.0 and up",
+            size="100 Mb",
+            updated_date="Today",
+            rating="4.5",
+            installs="10,000+",
+            mod_features="Unlimited Coins",
+            description_html="<p>Fun action game.</p>",
+            description_text="Fun action game.",
+            dw_page_url=f"https://an1.com/dw_{2000 + i}.html",
+        )
+        for i in range(count)
+    ]
+
+
+def _review(marker: str) -> str:
+    return "<p>" + (f"{marker} review prose. " * 20) + "</p>"
+
+
+def test_quota_error_is_flagged_as_run_level(sample_post: AN1Post):
+    """A 429 must be distinguishable from an ordinary generation failure."""
+    formatter = _formatter_with_fake_gemini(exc=RuntimeError("429 RESOURCE_EXHAUSTED. quota"))
+
+    with pytest.raises(QuotaExhaustedError):
+        formatter.format_html(sample_post)
+
+
+def test_non_quota_error_stays_a_plain_enhancement_error(sample_post: AN1Post):
+    formatter = _formatter_with_fake_gemini(exc=RuntimeError("500 INTERNAL"))
+
+    with pytest.raises(ContentEnhancementError) as excinfo:
+        formatter.format_html(sample_post)
+    assert not isinstance(excinfo.value, QuotaExhaustedError)
+
+
+def test_enhance_batch_maps_reviews_back_to_post_ids():
+    posts = _batch_posts(3)
+    payload = json.dumps(
+        [{"post_id": p.post_id, "review_html": _review(p.app_name)} for p in posts]
+    )
+    formatter = _formatter_with_fake_gemini(response_text=payload)
+
+    result = formatter.enhance_batch(posts)
+
+    assert set(result) == {p.post_id for p in posts}
+    assert "Game 1 review prose." in result["2001"]
+    # One call covers the whole batch; that is the entire point of batching.
+    assert formatter._genai_client.models.generate_content.call_count == 1
+
+
+def test_enhance_batch_ignores_unknown_and_unusable_entries():
+    posts = _batch_posts(2)
+    payload = json.dumps(
+        [
+            {"post_id": "2000", "review_html": _review("Game 0")},
+            {"post_id": "9999", "review_html": _review("Not requested")},
+            {"post_id": "2001", "review_html": "too short"},
+        ]
+    )
+    formatter = _formatter_with_fake_gemini(response_text=payload)
+
+    result = formatter.enhance_batch(posts)
+
+    # 2001 came back unusable and 9999 was never asked for, so only 2000 survives.
+    assert set(result) == {"2000"}
+
+
+def test_enhance_batch_salvages_whole_entries_from_a_truncated_reply():
+    posts = _batch_posts(3)
+    full = json.dumps(
+        [{"post_id": p.post_id, "review_html": _review(p.app_name)} for p in posts]
+    )
+    # Simulate the reply being cut off partway through the third entry.
+    truncated = full[: full.rindex("{")] + '{"post_id": "2002", "review_html": "<p>Game 2 rev'
+    formatter = _formatter_with_fake_gemini(response_text=truncated)
+
+    result = formatter.enhance_batch(posts)
+
+    # The two complete entries are recovered; only the mangled one is lost.
+    assert set(result) == {"2000", "2001"}
+
+
+def test_enhance_batch_raises_quota_exhausted_on_429():
+    formatter = _formatter_with_fake_gemini(exc=RuntimeError("429 RESOURCE_EXHAUSTED"))
+
+    with pytest.raises(QuotaExhaustedError):
+        formatter.enhance_batch(_batch_posts(2))
+
+
+def test_enhance_batch_raises_when_nothing_usable_comes_back():
+    formatter = _formatter_with_fake_gemini(response_text="I cannot help with that request.")
+
+    with pytest.raises(ContentEnhancementError, match="no usable reviews"):
+        formatter.enhance_batch(_batch_posts(2))
+
+
+def test_format_html_prefers_supplied_prose_over_a_fresh_call(sample_post: AN1Post):
+    formatter = _formatter_with_fake_gemini(response_text=_review("Should not be used"))
+
+    html_content = formatter.format_html(sample_post, enhanced_desc=_review("Batched"))
+
+    assert "Batched review prose." in html_content
+    assert "Should not be used" not in html_content
+    formatter._genai_client.models.generate_content.assert_not_called()
+
+
+def _sync_scrape_stub(url, resolve_download=False):
+    pid = url.split("/")[-1].split("-")[0]
+    return AN1Post(
+        post_id=pid,
+        url=url,
+        title=f"Game {pid} (MOD, Unlimited Coins)",
+        app_name=f"Game {pid}",
+        icon_url="https://an1.com/img.png",
+        developer="Dev",
+        categories=["Action"],
+        version="1.0",
+        android_version="5.0 and up",
+        size="100 Mb",
+        updated_date="Today",
+        rating="4.5",
+        installs="10,000+",
+        mod_features="Unlimited Coins",
+        description_html="<p>Fun action game.</p>",
+        description_text="Fun action game.",
+        dw_page_url=f"https://an1.com/dw_{pid}.html",
+    )
+
+
+def test_sync_stops_scraping_once_the_limit_is_filled(tmp_path: Path):
+    """A 40-URL discovery window must not cost 40 scrapes to publish 2 posts."""
+    discovered = [f"https://an1.com/{3000 + i}-game-{i}.html" for i in range(40)]
+    scraped: list[str] = []
+
+    def counting_scrape(url, resolve_download=False):
+        scraped.append(url)
+        return _sync_scrape_stub(url, resolve_download)
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=counting_scrape), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=False), \
+         patch("src.main.AN1Formatter.format_html", return_value="<p>Review content</p>"), \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--dry-run", "--limit", "2"])
+
+    assert result.exit_code == 0
+    assert len(scraped) == 2, f"scraped {len(scraped)} posts to publish 2"
+
+
+def test_sync_batches_generation_into_one_call_per_batch_size(tmp_path: Path):
+    discovered = [f"https://an1.com/{4000 + i}-game-{i}.html" for i in range(6)]
+    batch_sizes: list[int] = []
+
+    def fake_batch(self, posts):
+        batch_sizes.append(len(posts))
+        return {p.post_id: _review(p.app_name) for p in posts}
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=True), \
+         patch("src.main.AN1Formatter.enhance_batch", autospec=True, side_effect=fake_batch), \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--dry-run", "--limit", "6"])
+
+    assert result.exit_code == 0
+    # Six posts at the default batch size of 5 means two calls, not six.
+    assert batch_sizes == [5, 1]
+    assert "Successfully processed 6 AN1 post(s)" in result.stdout
+
+
+def test_sync_defers_backlog_and_exits_zero_when_quota_is_exhausted(tmp_path: Path):
+    """A spent quota is a deferral, not a broken pipeline, and must not publish raw text."""
+    db_path = tmp_path / "history.db"
+    discovered = [f"https://an1.com/{5000 + i}-game-{i}.html" for i in range(3)]
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=True), \
+         patch(
+             "src.main.AN1Formatter.enhance_batch",
+             side_effect=QuotaExhaustedError("429 RESOURCE_EXHAUSTED"),
+         ), \
+         patch("src.main.AN1Formatter.format_html") as mock_format, \
+         patch("src.main.DB_PATH", db_path):
+        result = runner.invoke(app, ["an1-sync", "--dry-run"])
+
+    assert result.exit_code == 0, result.stdout
+    # Nothing was formatted, so nothing could have gone out with AN1's scraped text.
+    mock_format.assert_not_called()
+    assert "backlog" in result.stdout
+    # The ledger is untouched, so the next run retries these posts.
+    assert HistoryDB(db_path).get_published_an1_keys() == set()
+
+
+def test_sync_stops_generating_after_the_first_quota_error(tmp_path: Path):
+    """The first 429 must end generation instead of burning a request per remaining post."""
+    discovered = [f"https://an1.com/{6000 + i}-game-{i}.html" for i in range(10)]
+    calls = {"n": 0}
+
+    def fail_with_quota(self, posts):
+        calls["n"] += 1
+        raise QuotaExhaustedError("429 RESOURCE_EXHAUSTED")
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=True), \
+         patch("src.main.AN1Formatter.enhance_batch", autospec=True, side_effect=fail_with_quota), \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--dry-run"])
+
+    assert result.exit_code == 0
+    # Ten posts would be two batches; the run stops after the first failure.
+    assert calls["n"] == 1
+
+
+def test_sync_publishes_the_batch_that_succeeded_before_the_quota_ran_out(tmp_path: Path):
+    discovered = [f"https://an1.com/{7000 + i}-game-{i}.html" for i in range(10)]
+
+    seen = {"n": 0}
+
+    def first_batch_then_quota(self, posts):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return {p.post_id: _review(p.app_name) for p in posts}
+        raise QuotaExhaustedError("429 RESOURCE_EXHAUSTED")
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=True), \
+         patch("src.main.AN1Formatter.enhance_batch", autospec=True, side_effect=first_batch_then_quota), \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Successfully processed 5 AN1 post(s)" in result.stdout

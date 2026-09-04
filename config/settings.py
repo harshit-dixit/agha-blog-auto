@@ -23,6 +23,10 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-3.5-flash"
+    # Posts per batched review request. The free tier bills a per-day request count, so
+    # batching is what keeps a run affordable; keep this small enough that one reply fits
+    # inside the output-token ceiling and a truncated response costs only a few posts.
+    GEMINI_BATCH_SIZE: int = 5
 
     BLOGGER_BLOG_ID: Optional[str] = None
     BLOGGER_CLIENT_ID: Optional[str] = None

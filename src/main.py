@@ -10,7 +10,11 @@ from rich.table import Table
 from config.settings import DB_PATH, TOPICS_FILE, get_settings
 from src.catalog import load_catalog
 from src.db.history import HistoryDB
-from src.generators.an1_formatter import AN1Formatter, ContentEnhancementError
+from src.generators.an1_formatter import (
+    AN1Formatter,
+    ContentEnhancementError,
+    QuotaExhaustedError,
+)
 from src.generators.gaming_writer import ArticleTooShortError, GamingArticleWriter
 from src.publishers.blogger_client import BloggerClient
 from src.publishers.oauth_helper import export_secrets as build_export_secrets
@@ -253,20 +257,24 @@ def an1_sync(
             console.print(Panel(str(exc), title="Blogger auth failed", style="red"))
             raise typer.Exit(code=1)
 
-    published_count = 0
-    failed_count = 0
+    # Phase 1: gather the posts this run will actually publish. Scanning stops as soon as
+    # `limit` eligible posts are in hand, so a 40-URL discovery window costs only the
+    # requests needed to fill this run rather than scraping and generating for all of it.
+    scrape_failure_budget = max(10, limit)
+    eligible: list[AN1Post] = []
+    scrape_failures = 0
 
     for url in candidate_urls:
-        if published_count >= limit:
+        if len(eligible) >= limit or scrape_failures >= scrape_failure_budget:
             break
 
-        with console.status(f"Processing {url}..."):
+        with console.status(f"Scanning {url}..."):
             # Scraped without the download page so already-published posts cost one request.
             try:
                 post = scraper.scrape_post(url, resolve_download=False)
                 scraper.validate_post(post)
             except AN1ScraperError as exc:
-                failed_count += 1
+                scrape_failures += 1
                 console.print(f"[yellow]Skipping {url} (validation/scrape error):[/] {exc}")
                 continue
 
@@ -274,14 +282,76 @@ def an1_sync(
             if (post.post_id, post.version) in published_keys or history.is_an1_published(post.post_id, post.version):
                 continue
 
+            eligible.append(post)
+
+    if not eligible:
+        # Failures with nothing eligible means the pipeline is broken (most likely an AN1
+        # markup change), not that the backlog is simply empty. Fail the run so CI reports
+        # it instead of showing a green "nothing new" forever.
+        if scrape_failures:
+            console.print(
+                Panel(
+                    f"{scrape_failures} of {len(candidate_urls)} discovered post(s) failed scraping or "
+                    "validation, and nothing was eligible to publish. AN1 markup may have changed.",
+                    title="Sync failed",
+                    style="red",
+                )
+            )
+            raise typer.Exit(code=1)
+        console.print(Panel("No new unpublished posts or version updates found on AN1.com.", style="green"))
+        return
+
+    # Phase 2: generate review prose in batches. The Gemini free tier's binding limit is a
+    # per-day request count, so a run costs ceil(len(eligible) / batch_size) requests
+    # instead of one per post. Keeping batches small holds each reply inside the
+    # output-token ceiling and stops one truncated response from wiping out the whole run.
+    prose_by_id: dict[str, str] = {}
+    generation_failures = 0
+    quota_exhausted = False
+
+    if formatter.gemini_enabled:
+        batch_size = max(1, settings.GEMINI_BATCH_SIZE)
+        batches = [eligible[i:i + batch_size] for i in range(0, len(eligible), batch_size)]
+        for index, batch in enumerate(batches, start=1):
+            names = ", ".join(p.app_name for p in batch)
+            try:
+                with console.status(f"Generating reviews (batch {index}/{len(batches)})..."):
+                    prose_by_id.update(formatter.enhance_batch(batch))
+            except QuotaExhaustedError as exc:
+                # Every later call this run fails identically, so stop instead of walking
+                # the rest of the backlog burning requests against a spent quota.
+                quota_exhausted = True
+                console.print(f"[yellow]Gemini quota exhausted, stopping generation:[/] {exc}")
+                break
+            except ContentEnhancementError as exc:
+                generation_failures += len(batch)
+                console.print(f"[yellow]Batch {index}/{len(batches)} failed ({names}):[/] {exc}")
+
+    # Phase 3: publish everything that has original prose. Posts without it stay in the
+    # backlog for the next run rather than going out with AN1's scraped text verbatim.
+    published_count = 0
+    deferred_count = 0
+
+    for post in eligible:
+        if published_count >= limit:
+            break
+
+        prose = prose_by_id.get(post.post_id)
+        if formatter.gemini_enabled and not prose:
+            deferred_count += 1
+            continue
+
+        title = formatter.build_post_title(post)
+        labels = formatter.build_labels(post)
+
+        with console.status(f"Publishing {title}..."):
+            # Only resolve the APK mirror for posts that actually reach publication.
             scraper.resolve_download_link(post)
 
-            title = formatter.build_post_title(post)
-            labels = formatter.build_labels(post)
             try:
-                html_content = formatter.format_html(post)
+                html_content = formatter.format_html(post, enhanced_desc=prose)
             except ContentEnhancementError as exc:
-                failed_count += 1
+                generation_failures += 1
                 console.print(f"[yellow]Skipping {title} (content generation failed):[/] {exc}")
                 continue
 
@@ -333,27 +403,50 @@ def an1_sync(
             published_count += 1
             console.print(f"[green]{action}:[/] {title} -> {result.get('url', 'n/a')}")
 
-    # Nothing published *and* posts failed means the pipeline is broken (most likely an AN1
-    # markup change), not that the backlog is simply empty. Fail the run so CI reports it
-    # instead of showing a green "nothing new" forever.
-    if failed_count and published_count == 0:
+    notes: list[str] = []
+    if quota_exhausted:
+        notes.append("Gemini quota exhausted")
+    if deferred_count:
+        notes.append(f"{deferred_count} deferred to the next run")
+    if generation_failures:
+        notes.append(f"{generation_failures} skipped after generation errors")
+    if scrape_failures:
+        notes.append(f"{scrape_failures} skipped after scrape errors")
+
+    if published_count:
+        summary = f"Successfully processed {published_count} AN1 post(s)."
+        if notes:
+            summary += " " + "; ".join(notes) + "."
+        console.print(Panel(summary, style="green"))
+        return
+
+    if quota_exhausted or deferred_count:
+        # Nothing was published, but nothing was lost either: the unpublished posts are
+        # still absent from the ledger, so the next scheduled run picks them up. Exit 0 so
+        # a spent quota does not surface as a broken pipeline.
         console.print(
             Panel(
-                f"{failed_count} of {len(candidate_urls)} discovered post(s) failed scraping, validation, "
-                "or content generation, and nothing was published. AN1 markup may have changed.",
+                f"No posts published. {len(eligible)} eligible post(s) remain in the backlog and "
+                "will be retried on the next run."
+                + (" Gemini quota is exhausted for now." if quota_exhausted else ""),
+                title="Deferred",
+                style="yellow",
+            )
+        )
+        return
+
+    if generation_failures or scrape_failures:
+        console.print(
+            Panel(
+                f"{generation_failures + scrape_failures} post(s) failed scraping, validation, or "
+                "content generation, and nothing was published.",
                 title="Sync failed",
                 style="red",
             )
         )
         raise typer.Exit(code=1)
 
-    if published_count == 0:
-        console.print(Panel("No new unpublished posts or version updates found on AN1.com.", style="green"))
-    else:
-        summary = f"Successfully processed {published_count} AN1 post(s)."
-        if failed_count:
-            summary += f" {failed_count} post(s) skipped after errors."
-        console.print(Panel(summary, style="green"))
+    console.print(Panel("No new unpublished posts or version updates found on AN1.com.", style="green"))
 
 
 @app.command()
