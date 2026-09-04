@@ -43,14 +43,6 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Restore publication data cache
-        uses: actions/cache@v4
-        with:
-          path: data
-          key: an1-history-db-${{ github.run_id }}
-          restore-keys: |
-            an1-history-db-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
 
@@ -92,11 +84,12 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p data
-          git add data/an1_published.json
-          if ! git diff --staged --quiet; then
-            git commit -m "Update AN1 published posts ledger [skip ci]"
-            git push
-          else
-            echo "No new publications to commit."
+          if [ -f data/an1_published.json ]; then
+            git add data/an1_published.json
+            if ! git diff --staged --quiet; then
+              git commit -m "Update AN1 published posts ledger [skip ci]"
+              git pull --rebase --autostash && git push
+            else
+              echo "No new publications to commit."
+            fi
           fi

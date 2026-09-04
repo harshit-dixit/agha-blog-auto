@@ -118,19 +118,19 @@ def an1_post(
     settings = get_settings()
     history = HistoryDB(DB_PATH)
     scraper = AN1Scraper()
-    formatter = AN1Formatter()
-
-    post_id = scraper.extract_post_id(url)
-    if not dry_run and history.is_an1_published(post_id):
-        console.print(Panel(f"Post {post_id!r} has already been published to Blogger.", title="Already Published", style="yellow"))
-        return
+    formatter = AN1Formatter(settings=settings)
 
     with console.status(f"Scraping {url}..."):
         try:
             post = scraper.scrape_post(url)
+            scraper.validate_post(post)
         except AN1ScraperError as exc:
-            console.print(Panel(str(exc), title="Scrape failed", style="red"))
+            console.print(Panel(str(exc), title="Scrape or validation failed", style="red"))
             raise typer.Exit(code=1)
+
+    if not dry_run and history.is_an1_published(post.post_id, post.version):
+        console.print(Panel(f"Post {post.app_name} v{post.version} has already been published to Blogger.", title="Already Published", style="yellow"))
+        return
 
     title = formatter.build_post_title(post)
     labels = formatter.build_labels(post)
@@ -138,7 +138,7 @@ def an1_post(
 
     console.print(
         f"[green]Scraped & Formatted[/] '[bold]{post.app_name}[/]' (v{post.version}) — "
-        f"Direct Link: {post.direct_download_url or 'n/a'}"
+        f"Primary Link: {post.dw_page_url or 'n/a'}"
     )
 
     is_draft = draft if draft is not None else settings.DEFAULT_PUBLISH_STATUS == "DRAFT"
@@ -151,21 +151,39 @@ def an1_post(
         console.print(Panel(f"Dry run only — preview saved to {preview_path}", style="yellow"))
         return
 
-    with console.status("Publishing to Blogger..."):
-        try:
-            blogger = BloggerClient(settings)
-            result = blogger.publish_article(
-                title=title,
-                content=html_content,
-                labels=labels,
-                is_draft=is_draft,
-            )
-        except RuntimeError as exc:
-            console.print(Panel(str(exc), title="Publish failed", style="red"))
-            raise typer.Exit(code=1)
+    blogger = BloggerClient(settings)
+    existing = history.get_existing_blogger_post(post.post_id)
+
+    if existing and existing.blogger_post_id:
+        with console.status(f"Updating existing Blogger post to v{post.version}..."):
+            try:
+                result = blogger.update_article(
+                    post_id=existing.blogger_post_id,
+                    title=title,
+                    content=html_content,
+                    labels=labels,
+                )
+            except RuntimeError as exc:
+                console.print(Panel(str(exc), title="Blogger update failed", style="red"))
+                raise typer.Exit(code=1)
+        action_name = "Updated"
+    else:
+        with console.status("Publishing to Blogger..."):
+            try:
+                result = blogger.publish_article(
+                    title=title,
+                    content=html_content,
+                    labels=labels,
+                    is_draft=is_draft,
+                )
+            except RuntimeError as exc:
+                console.print(Panel(str(exc), title="Publish failed", style="red"))
+                raise typer.Exit(code=1)
+        action_name = "Published"
 
     history.record_an1_publication(
         post_id=post.post_id,
+        version=post.version,
         source_url=post.url,
         title=title,
         direct_download_url=post.direct_download_url,
@@ -178,8 +196,8 @@ def an1_post(
     status_label = "DRAFT" if is_draft else "LIVE"
     console.print(
         Panel(
-            f"[bold]{title}[/]\nStatus: {status_label}\nBlogger URL: {result.get('url', 'n/a')}\nDirect Link: {post.direct_download_url}",
-            title="AN1 Post Published",
+            f"[bold]{title}[/]\nAction: {action_name}\nStatus: {status_label}\nBlogger URL: {result.get('url', 'n/a')}\nPrimary DW Page: {post.dw_page_url}",
+            title=f"AN1 Post {action_name}",
             style="green",
         )
     )
@@ -199,33 +217,46 @@ def an1_sync(
     settings = get_settings()
     history = HistoryDB(DB_PATH)
     scraper = AN1Scraper()
-    formatter = AN1Formatter()
+    formatter = AN1Formatter(settings=settings)
 
     with console.status("Checking AN1.com for latest posts..."):
-        discovered_urls = scraper.fetch_latest_post_urls(limit=30)
+        discovered_urls = scraper.fetch_latest_post_urls(limit=40)
 
-    published_ids = history.get_published_an1_ids()
-    new_urls: list[str] = []
-    for url in discovered_urls:
-        pid = scraper.extract_post_id(url)
-        if pid not in published_ids:
-            new_urls.append(url)
-
-    if not new_urls:
-        console.print(Panel("No new posts found on AN1.com. All latest posts have already been published.", style="green"))
+    if not discovered_urls:
+        console.print(Panel("Could not discover posts from AN1.com.", style="yellow"))
         return
 
-    console.print(f"[bold cyan]Found {len(new_urls)} new post(s) on AN1.com.[/] Processing up to {limit}...")
+    # Process discovered URLs oldest-first so the backlog is consumed chronologically
+    candidate_urls = list(reversed(discovered_urls))
+    published_keys = history.get_published_an1_keys()
 
-    to_process = new_urls[:limit]
+    console.print(f"[bold cyan]Scanning {len(candidate_urls)} posts from AN1.com...[/]")
+
+    # Hoist BloggerClient so authentication happens once
+    blogger: Optional[BloggerClient] = None
+    if not dry_run:
+        try:
+            blogger = BloggerClient(settings)
+        except RuntimeError as exc:
+            console.print(Panel(str(exc), title="Blogger auth failed", style="red"))
+            raise typer.Exit(code=1)
+
     published_count = 0
 
-    for url in to_process:
+    for url in candidate_urls:
+        if published_count >= limit:
+            break
+
         with console.status(f"Processing {url}..."):
             try:
                 post = scraper.scrape_post(url)
+                scraper.validate_post(post)
             except AN1ScraperError as exc:
-                console.print(f"[yellow]Skipping {url}:[/] {exc}")
+                console.print(f"[yellow]Skipping {url} (validation/scrape error):[/] {exc}")
+                continue
+
+            # Check if this exact (post_id, version) is already recorded
+            if (post.post_id, post.version) in published_keys or history.is_an1_published(post.post_id, post.version):
                 continue
 
             title = formatter.build_post_title(post)
@@ -243,20 +274,32 @@ def an1_sync(
                 published_count += 1
                 continue
 
+            existing = history.get_existing_blogger_post(post.post_id)
             try:
-                blogger = BloggerClient(settings)
-                result = blogger.publish_article(
-                    title=title,
-                    content=html_content,
-                    labels=labels,
-                    is_draft=is_draft,
-                )
+                assert blogger is not None
+                if existing and existing.blogger_post_id:
+                    result = blogger.update_article(
+                        post_id=existing.blogger_post_id,
+                        title=title,
+                        content=html_content,
+                        labels=labels,
+                    )
+                    action = "Updated"
+                else:
+                    result = blogger.publish_article(
+                        title=title,
+                        content=html_content,
+                        labels=labels,
+                        is_draft=is_draft,
+                    )
+                    action = "Published"
             except RuntimeError as exc:
                 console.print(f"[red]Failed to publish {title}:[/] {exc}")
                 continue
 
             history.record_an1_publication(
                 post_id=post.post_id,
+                version=post.version,
                 source_url=post.url,
                 title=title,
                 direct_download_url=post.direct_download_url,
@@ -266,9 +309,12 @@ def an1_sync(
                 status="DRAFT" if is_draft else "LIVE",
             )
             published_count += 1
-            console.print(f"[green]Published:[/] {title} -> {result.get('url', 'n/a')}")
+            console.print(f"[green]{action}:[/] {title} -> {result.get('url', 'n/a')}")
 
-    console.print(Panel(f"Successfully processed {published_count} AN1 post(s).", style="green"))
+    if published_count == 0:
+        console.print(Panel("No new unpublished posts or version updates found on AN1.com.", style="green"))
+    else:
+        console.print(Panel(f"Successfully processed {published_count} AN1 post(s).", style="green"))
 
 
 @app.command()

@@ -1,24 +1,56 @@
 from __future__ import annotations
 
 import html
+import logging
 from typing import Optional
 
+from google import genai
+from google.genai import types
+
+from config.settings import Settings
 from src.scrapers.an1_scraper import AN1Post
+
+logger = logging.getLogger(__name__)
+
+GEMINI_ENHANCE_PROMPT = """You are a senior gaming journalist and app reviewer for Android Game Hack Area.
+Write a comprehensive, engaging, and original app review for the following Android game/application based on its metadata:
+
+App Name: {app_name}
+Version: {version}
+Developer: {developer}
+Category: {category}
+Mod Features: {mod_features}
+Scraped Summary: {raw_description}
+
+INSTRUCTIONS:
+1. Write 3-4 detailed, beautifully phrased paragraphs covering:
+   - Introduction: What the app/game is, its premise, why it's popular, and what makes it fun.
+   - Core Mechanics & Gameplay: Controls, graphics, atmosphere, game modes, progression.
+   - MOD Highlights: Explain what the modified features ({mod_features}) unlock and how they enhance the gameplay.
+   - Player Tips: 2-3 helpful strategies or settings recommendations.
+2. Tone: Engaging, technical yet accessible, gamer-friendly.
+3. Output format: Return ONLY the paragraphs wrapped in clean HTML <p>...</p> tags.
+4. Do NOT include markdown fences, <html>, <body>, <h1>, or download links (these are handled by the template).
+5. Ensure the text is 100% original and natural (not a regurgitation of the scraped summary)."""
 
 
 class AN1Formatter:
     """Formats an AN1 scraped post into a modern, mobile-responsive HTML post for Blogger."""
 
-    def __init__(self, site_name: str = "Android Game Hack Area") -> None:
-        self.site_name = site_name
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings
+        self._genai_client = None
+        if self.settings and self.settings.GEMINI_API_KEY:
+            try:
+                self._genai_client = genai.Client(api_key=self.settings.GEMINI_API_KEY)
+            except Exception as exc:
+                logger.warning("Failed to initialize Gemini client for AN1Formatter: %s", exc)
 
     def build_post_title(self, post: AN1Post) -> str:
         """Create a clean, SEO-optimized title for Blogger."""
-        # e.g. "Subway Surfers MOD APK 3.68.5 (Unlimited Coins/Keys) Download"
         features_snippet = f" ({post.mod_features})" if post.mod_features else ""
         ver_snippet = f" v{post.version}" if post.version and post.version.lower() != "latest" else ""
         title = f"{post.app_name}{ver_snippet}{features_snippet} Download for Android"
-        # Keep title within clean SEO length (< 75 chars when possible)
         if len(title) > 90:
             title = f"{post.app_name}{ver_snippet} MOD APK Download"
         return title
@@ -36,10 +68,41 @@ class AN1Formatter:
         labels.append("Direct Download")
         return list(dict.fromkeys(labels))[:8]
 
+    def _enhance_with_gemini(self, post: AN1Post) -> Optional[str]:
+        """Optionally generate original, engaging review prose via Gemini."""
+        if not self._genai_client or not self.settings:
+            return None
+
+        prompt = GEMINI_ENHANCE_PROMPT.format(
+            app_name=post.app_name,
+            version=post.version,
+            developer=post.developer,
+            category=", ".join(post.categories),
+            mod_features=post.mod_features,
+            raw_description=post.description_text,
+        )
+
+        try:
+            response = self._genai_client.models.generate_content(
+                model=self.settings.GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,
+                ),
+            )
+            text = response.text.strip()
+            # Basic cleanup of any accidental markdown fences
+            text = text.replace("```html", "").replace("```", "").strip()
+            if text.startswith("<p>") and len(text) > 200:
+                return text
+        except Exception as exc:
+            logger.warning("Gemini enhancement failed for %s: %s; falling back to template text.", post.app_name, exc)
+
+        return None
+
     def format_html(self, post: AN1Post) -> str:
         """Generate modern, fully responsive, standalone-styled HTML for Blogger post body."""
         app_name = html.escape(post.app_name)
-        title = html.escape(post.title)
         developer = html.escape(post.developer)
         version = html.escape(post.version)
         android_ver = html.escape(post.android_version)
@@ -49,9 +112,10 @@ class AN1Formatter:
         rating = html.escape(post.rating or "4.8")
         installs = html.escape(post.installs or "1,000,000+")
 
-        # Primary download link: use direct link if available, otherwise download page URL
-        primary_link = post.direct_download_url or post.dw_page_url or post.url
-        mirror_link = post.dw_page_url if (post.direct_download_url and post.dw_page_url) else None
+        # Primary download link: Stable AN1 download page
+        primary_link = post.dw_page_url or post.url
+        # Secondary download link: Direct APK mirror (if resolved and verified)
+        mirror_link = post.direct_download_url if (post.direct_download_url and post.direct_download_url != primary_link) else None
 
         # Build screenshots HTML
         screenshots_html = ""
@@ -71,24 +135,30 @@ class AN1Formatter:
             </div>
             """
 
-        # Build description paragraphs
-        desc_text = post.description_text or "Download the latest modified version with unlocked features and unlimited resources."
-        paragraphs = [p.strip() for p in desc_text.split("\n") if p.strip()]
-        if len(paragraphs) <= 1 and len(desc_text) > 150:
-            # Split sentences into clean readable paragraphs
-            sentences = desc_text.split(". ")
-            half = len(sentences) // 2
-            p1 = ". ".join(sentences[:half]).strip() + "."
-            p2 = ". ".join(sentences[half:]).strip()
-            paragraphs = [p for p in (p1, p2) if p]
-        desc_formatted = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
+        # Description text: try Gemini original text first, otherwise fallback to structured parsed text
+        enhanced_desc = self._enhance_with_gemini(post)
+        if enhanced_desc:
+            desc_formatted = enhanced_desc
+        else:
+            desc_text = post.description_text or "Download the latest modified version with unlocked features and unlimited resources."
+            # Split paragraphs cleanly by newline or sentence blocks
+            raw_blocks = [b.strip() for b in desc_text.split("\n\n") if b.strip()]
+            if not raw_blocks:
+                raw_blocks = [desc_text]
+            desc_formatted = "".join(f"<p>{html.escape(b)}</p>" for b in raw_blocks)
 
-        # Mirror download button HTML
+        # Build download buttons (Inverted order: AN1 stable page as primary, direct APK as secondary mirror)
+        primary_btn_html = f"""
+        <a href="{html.escape(primary_link)}" class="agha-btn agha-btn-primary" target="_blank" rel="noopener nofollow">
+            <span>⬇ Download APK ({size})</span>
+        </a>
+        """
+
         mirror_btn_html = ""
         if mirror_link:
             mirror_btn_html = f"""
             <a href="{html.escape(mirror_link)}" class="agha-btn agha-btn-secondary" target="_blank" rel="noopener nofollow">
-                <span>🌐 Alternative Server (AN1)</span>
+                <span>⚡ Direct APK Mirror</span>
             </a>
             """
 
@@ -368,13 +438,11 @@ class AN1Formatter:
         <div style="font-weight: 700; font-size: 17px; color: #0f172a;">Get {app_name} MOD APK for Android</div>
         <div style="font-size: 13px; color: #64748b; margin-top: 2px;">Version {version} • File Size {size}</div>
         <div class="agha-btn-group">
-            <a href="{html.escape(primary_link)}" class="agha-btn agha-btn-primary" target="_blank" rel="noopener nofollow">
-                <span>⬇ Download APK ({size})</span>
-            </a>
+            {primary_btn_html}
             {mirror_btn_html}
         </div>
         <div class="agha-safe-check">
-            <span>🛡️ Verified Clean • No Malware • Direct Link</span>
+            <span>⬇ Fast Direct Download • Tested Package</span>
         </div>
     </div>
 
@@ -439,8 +507,8 @@ class AN1Formatter:
     <div class="agha-section">
         <h3 class="agha-subtitle">❓ Frequently Asked Questions</h3>
         <div class="agha-faq-item">
-            <div class="agha-faq-q">Is this MOD APK safe to use on Android?</div>
-            <div class="agha-faq-a">Yes. The package has been verified to be virus-free and does not require unauthorized device privileges.</div>
+            <div class="agha-faq-q">Is this APK safe to install on my phone?</div>
+            <div class="agha-faq-a">We provide verified package links. As a best practice, always check downloaded APK files with your device built-in security scanner or Play Protect.</div>
         </div>
         <div class="agha-faq-item">
             <div class="agha-faq-q">Do I need root permissions to run this game?</div>
@@ -455,15 +523,13 @@ class AN1Formatter:
     <!-- Bottom Download Box -->
     <div class="agha-cta-box" style="margin-top: 36px; background: #f0fdf4; border-color: #86efac;">
         <div style="font-weight: 700; font-size: 18px; color: #166534;">Download {app_name} MOD APK</div>
-        <div style="font-size: 13px; color: #15803d; margin-top: 3px;">High Speed Direct Download • Version {version}</div>
+        <div style="font-size: 13px; color: #15803d; margin-top: 3px;">Direct Download • Version {version}</div>
         <div class="agha-btn-group">
-            <a href="{html.escape(primary_link)}" class="agha-btn agha-btn-primary" target="_blank" rel="noopener nofollow">
-                <span>⬇ Download APK ({size})</span>
-            </a>
+            {primary_btn_html}
             {mirror_btn_html}
         </div>
         <p style="font-size: 12px; color: #64748b; margin-top: 14px; margin-bottom: 0;">
-            Disclaimer: All files are provided for testing and evaluation purposes. All trademarks and logos belong to their respective copyright holders.
+            Disclaimer: All files are provided for informational and testing purposes. All trademarks, logos, and brand names belong to their respective copyright holders.
         </p>
     </div>
 </div>

@@ -26,17 +26,18 @@ CREATE INDEX IF NOT EXISTS idx_published_posts_category ON published_posts(categ
 
 CREATE TABLE IF NOT EXISTS an1_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    post_id TEXT NOT NULL UNIQUE,
-    source_url TEXT NOT NULL UNIQUE,
+    post_id TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL,
     title TEXT NOT NULL,
     direct_download_url TEXT,
     dw_page_url TEXT,
     blogger_post_id TEXT,
     blogger_url TEXT,
     published_at TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    UNIQUE(post_id, version)
 );
-CREATE INDEX IF NOT EXISTS idx_an1_posts_post_id ON an1_posts(post_id);
 """
 
 
@@ -57,6 +58,7 @@ class PublishedPost:
 class AN1PublishedPost:
     id: int
     post_id: str
+    version: str
     source_url: str
     title: str
     direct_download_url: Optional[str]
@@ -76,6 +78,12 @@ class HistoryDB:
         self.json_tracker_path = json_tracker_path or (self.db_path.parent / "an1_published.json")
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # Automatic migration for existing DBs
+            cursor = conn.execute("PRAGMA table_info(an1_posts)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "version" not in columns:
+                conn.execute("ALTER TABLE an1_posts ADD COLUMN version TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_an1_posts_lookup ON an1_posts(post_id, version)")
         self._sync_from_json_tracker()
 
     @contextmanager
@@ -215,31 +223,36 @@ class HistoryDB:
         if not self.json_tracker_path.exists():
             return
         try:
-            data = json.loads(self.json_tracker_path.read_text(encoding="utf-8"))
-            if not isinstance(data, list):
+            content = self.json_tracker_path.read_text(encoding="utf-8")
+            if not content.strip():
                 return
-            with self._connect() as conn:
-                for item in data:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO an1_posts
-                            (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            item.get("post_id"),
-                            item.get("source_url"),
-                            item.get("title", ""),
-                            item.get("direct_download_url"),
-                            item.get("dw_page_url"),
-                            item.get("blogger_post_id"),
-                            item.get("blogger_url"),
-                            item.get("published_at", datetime.now(timezone.utc).isoformat()),
-                            item.get("status", "LIVE"),
-                        ),
-                    )
-        except Exception:
-            pass
+            data = json.loads(content)
+            if not isinstance(data, list):
+                raise ValueError(f"Expected list in {self.json_tracker_path}, got {type(data).__name__}")
+        except Exception as exc:
+            raise RuntimeError(f"Corrupt or unreadable AN1 publication ledger at {self.json_tracker_path}: {exc}") from exc
+
+        with self._connect() as conn:
+            for item in data:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO an1_posts
+                        (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.get("post_id"),
+                        item.get("version", ""),
+                        item.get("source_url"),
+                        item.get("title", ""),
+                        item.get("direct_download_url"),
+                        item.get("dw_page_url"),
+                        item.get("blogger_post_id"),
+                        item.get("blogger_url"),
+                        item.get("published_at", datetime.now(timezone.utc).isoformat()),
+                        item.get("status", "LIVE"),
+                    ),
+                )
 
     def _save_to_json_tracker(self) -> None:
         """Export current AN1 publications to an1_published.json for persistent Git tracking."""
@@ -247,6 +260,7 @@ class HistoryDB:
         serialized = [
             {
                 "post_id": p.post_id,
+                "version": p.version,
                 "source_url": p.source_url,
                 "title": p.title,
                 "direct_download_url": p.direct_download_url,
@@ -261,22 +275,37 @@ class HistoryDB:
         self.json_tracker_path.parent.mkdir(parents=True, exist_ok=True)
         self.json_tracker_path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
 
-    def is_an1_published(self, post_id: str) -> bool:
-        """Check if an AN1 post ID has already been published."""
+    def is_an1_published(self, post_id: str, version: Optional[str] = None) -> bool:
+        """Check if an AN1 post ID (or specific version) has already been published."""
         with self._connect() as conn:
-            row = conn.execute("SELECT 1 FROM an1_posts WHERE post_id = ?", (post_id,)).fetchone()
+            if version is not None:
+                row = conn.execute(
+                    "SELECT 1 FROM an1_posts WHERE post_id = ? AND version = ?", (post_id, version)
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT 1 FROM an1_posts WHERE post_id = ?", (post_id,)).fetchone()
         return row is not None
 
-    def get_published_an1_ids(self) -> set[str]:
-        """Return set of all published AN1 post IDs."""
+    def get_existing_blogger_post(self, post_id: str) -> Optional[AN1PublishedPost]:
+        """Return the most recent publication record for an AN1 post ID, if one exists."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT post_id FROM an1_posts").fetchall()
-        return {row["post_id"] for row in rows}
+            row = conn.execute(
+                "SELECT * FROM an1_posts WHERE post_id = ? ORDER BY id DESC LIMIT 1",
+                (post_id,),
+            ).fetchone()
+        return AN1PublishedPost(**dict(row)) if row else None
+
+    def get_published_an1_keys(self) -> set[tuple[str, str]]:
+        """Return set of all published (post_id, version) pairs."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT post_id, version FROM an1_posts").fetchall()
+        return {(row["post_id"], row["version"]) for row in rows}
 
     def record_an1_publication(
         self,
         *,
         post_id: str,
+        version: str,
         source_url: str,
         title: str,
         direct_download_url: Optional[str] = None,
@@ -290,11 +319,11 @@ class HistoryDB:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO an1_posts
-                    (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO an1_posts
+                    (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status),
+                (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status),
             )
             row_id = cursor.lastrowid or 0
         self._save_to_json_tracker()

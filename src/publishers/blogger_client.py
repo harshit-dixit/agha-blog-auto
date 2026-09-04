@@ -40,6 +40,25 @@ class BloggerClient:
         except HttpError as exc:
             raise RuntimeError(f"Blogger publish failed: {exc}") from exc
 
+    def update_article(
+        self,
+        post_id: str,
+        *,
+        title: str,
+        content: str,
+        labels: list[str],
+    ) -> dict:
+        """Update an existing post in Blogger (e.g. for version bumps)."""
+        body = {"kind": "blogger#post", "id": post_id, "title": title, "content": content, "labels": labels}
+        try:
+            return (
+                self._service.posts()
+                .patch(blogId=self.blog_id, postId=post_id, body=body)
+                .execute()
+            )
+        except HttpError as exc:
+            raise RuntimeError(f"Blogger update failed for post {post_id}: {exc}") from exc
+
     def list_recent_posts(self, max_results: int = 10) -> list[dict]:
         response = (
             self._service.posts()

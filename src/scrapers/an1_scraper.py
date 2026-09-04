@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+
+logger = logging.getLogger(__name__)
 
 
 class AN1ScraperError(RuntimeError):
@@ -16,6 +22,11 @@ class AN1ScraperError(RuntimeError):
 
 class AN1PostNotFoundError(AN1ScraperError):
     """Raised when an AN1 post could not be retrieved or parsed."""
+    pass
+
+
+class AN1ValidationError(AN1ScraperError):
+    """Raised when a scraped post fails validation checks."""
     pass
 
 
@@ -55,17 +66,34 @@ class AN1Scraper:
         base_url: str = "https://an1.com",
         session: Optional[requests.Session] = None,
         timeout: int = 15,
+        request_delay: float = 1.0,
+        verify_direct_link: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.session = session or requests.Session()
-        self.session.headers.update(
+        self.request_delay = request_delay
+        self.verify_direct_link = verify_direct_link
+        self.session = session or self._create_resilient_session()
+
+    def _create_resilient_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update(
             {
                 "User-Agent": self.DEFAULT_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
             }
         )
+        retries = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     @staticmethod
     def extract_post_id(url: str) -> str:
@@ -73,7 +101,6 @@ class AN1Scraper:
         match = re.search(r"/(\d+)-", url)
         if match:
             return match.group(1)
-        # Fallback to slug without extension
         slug = url.split("/")[-1].replace(".html", "")
         return slug
 
@@ -94,21 +121,23 @@ class AN1Scraper:
         seen: set[str] = set()
 
         for source_url in sources:
+            if self.request_delay > 0 and seen:
+                time.sleep(self.request_delay)
+
             try:
                 resp = self.session.get(source_url, timeout=self.timeout)
                 resp.raise_for_status()
             except requests.RequestException as exc:
+                logger.warning("Failed to fetch discovery page %s: %s", source_url, exc)
                 continue
 
             soup = BeautifulSoup(resp.text, "lxml")
-            # Anchor selectors found in post cards across an1.com
             links = soup.select("div.data div.name a, div.item_app div.name a, div.app_list div.name a")
             for link in links:
                 href = link.get("href")
                 if not href:
                     continue
                 full_url = urllib.parse.urljoin(self.base_url, href)
-                # Ensure it's a content post (e.g. /<digits>-slug.html)
                 if re.search(r"/\d+-[^/]+\.html$", full_url):
                     if full_url not in seen:
                         seen.add(full_url)
@@ -120,6 +149,9 @@ class AN1Scraper:
 
     def scrape_post(self, url: str) -> AN1Post:
         """Scrape full post details, download page redirect, and direct APK link."""
+        if self.request_delay > 0:
+            time.sleep(self.request_delay)
+
         try:
             resp = self.session.get(url, timeout=self.timeout)
             resp.raise_for_status()
@@ -138,7 +170,6 @@ class AN1Scraper:
         if name_meta and name_meta.get("content"):
             app_name = name_meta["content"].strip()
         else:
-            # Fallback parse: "Download <AppName> (MOD, ...) 1.2.3 free on android"
             clean = re.sub(r"^Download\s+", "", raw_title, flags=re.I)
             clean = re.sub(r"\s+\(MOD.*$", "", clean, flags=re.I)
             clean = re.sub(r"\s+\d+(\.\d+)+.*$", "", clean)
@@ -170,7 +201,7 @@ class AN1Scraper:
             categories = ["Games", "MOD"]
 
         # Specs from spec lists
-        version = "Latest"
+        version = ""
         android_version = "Android 6.0+"
         size = "Unknown"
         updated_date = "Recently"
@@ -191,7 +222,7 @@ class AN1Scraper:
 
         for li in soup.select("ul.spec li"):
             text = li.get_text(" ", strip=True)
-            if "Version:" in text and version == "Latest":
+            if "Version:" in text and not version:
                 version = text.replace("Version:", "").strip()
             elif ("Mb" in text or "Gb" in text or "MB" in text) and size == "Unknown":
                 size = text.strip()
@@ -211,7 +242,6 @@ class AN1Scraper:
         description_text = ""
         description_html = ""
         if desc_div:
-            # Extract clean text and inner HTML
             description_text = desc_div.get_text(" ", strip=True)
             description_html = "".join(
                 str(child) for child in desc_div.children if getattr(child, "name", None) != "button"
@@ -228,7 +258,6 @@ class AN1Scraper:
             for img in soup.select("div.app_screens_list img"):
                 src = img.get("src")
                 if src:
-                    # Convert thumbnail to full image if thumbnail URL pattern exists
                     full_src = src.replace("/thumbs/", "/")
                     screenshots.append(urllib.parse.urljoin(self.base_url, full_src))
 
@@ -251,7 +280,7 @@ class AN1Scraper:
             icon_url=icon_url,
             developer=developer,
             categories=categories,
-            version=version,
+            version=version or "1.0",
             android_version=android_version,
             size=size,
             updated_date=updated_date,
@@ -267,28 +296,68 @@ class AN1Scraper:
 
     def _extract_direct_download_link(self, dw_page_url: str) -> Optional[str]:
         """Visit the download page (e.g. /file_*-dw.html) and locate the real direct download link."""
+        if self.request_delay > 0:
+            time.sleep(self.request_delay)
+
         try:
             resp = self.session.get(dw_page_url, timeout=self.timeout)
             resp.raise_for_status()
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            logger.warning("Failed to fetch download page %s: %s", dw_page_url, exc)
             return None
 
         soup = BeautifulSoup(resp.text, "lxml")
+        candidate_url: Optional[str] = None
 
         # 1. Check <a id="pre_download" href="...">
         pre_dw = soup.find("a", id="pre_download")
         if pre_dw and pre_dw.get("href") and pre_dw["href"] not in ("#", ""):
-            return pre_dw["href"]
+            candidate_url = urllib.parse.urljoin(dw_page_url, pre_dw["href"])
 
         # 2. Check for any direct apk link
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.endswith(".apk") and "an1store.apk" not in href:
-                return href
+        if not candidate_url:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.endswith(".apk") and "an1store.apk" not in href:
+                    candidate_url = urllib.parse.urljoin(dw_page_url, href)
+                    break
 
         # 3. Check regex in page body for files.an1 link
-        match = re.search(r'https?://files\.an1\.(?:net|co)/[^\'"\s]+\.apk', resp.text)
-        if match:
-            return match.group(0)
+        if not candidate_url:
+            match = re.search(r'https?://files\.an1\.(?:net|co)/[^\'"\s]+\.apk', resp.text)
+            if match:
+                candidate_url = match.group(0)
 
-        return None
+        if not candidate_url:
+            return None
+
+        # Optional HEAD check to verify direct link is active and not returning 403/404
+        if self.verify_direct_link:
+            try:
+                head_resp = self.session.head(candidate_url, timeout=5, allow_redirects=True)
+                if head_resp.status_code not in (200, 206, 301, 302):
+                    logger.warning("Direct download link %s returned status %d; ignoring.", candidate_url, head_resp.status_code)
+                    return None
+            except requests.RequestException as exc:
+                logger.warning("Direct link HEAD check failed for %s: %s; ignoring.", candidate_url, exc)
+                return None
+
+        return candidate_url
+
+    def validate_post(self, post: AN1Post) -> None:
+        """Strict validation gate: ensure post is completely and reliably parsed before publishing."""
+        errors: list[str] = []
+
+        if not post.post_id:
+            errors.append("Missing post_id")
+        if not post.title:
+            errors.append("Missing post title")
+        if not post.app_name or post.app_name == "Android App":
+            errors.append(f"Invalid or sentinel app_name: {post.app_name!r}")
+        if not post.version or post.version in ("Latest", "Unknown"):
+            errors.append(f"Invalid or sentinel version: {post.version!r}")
+        if not post.dw_page_url or not post.dw_page_url.startswith(("http://", "https://")):
+            errors.append(f"Invalid or missing dw_page_url: {post.dw_page_url!r}")
+
+        if errors:
+            raise AN1ValidationError(f"Validation failed for post '{post.title}': {'; '.join(errors)}")
