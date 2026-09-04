@@ -796,3 +796,55 @@ def test_sync_publishes_the_batch_that_succeeded_before_the_quota_ran_out(tmp_pa
 
     assert result.exit_code == 0
     assert "Successfully processed 5 AN1 post(s)" in result.stdout
+
+
+def test_json_ledger_keeps_every_row_past_the_list_default_limit(tmp_path: Path):
+    """A ledger larger than list_an1_posts()' default page must survive a rewrite.
+
+    In CI the SQLite file is disposable and rebuilt from this JSON each run, so a row
+    dropped here is a post that gets republished as a duplicate on the next run.
+    """
+    db_path = tmp_path / "history.db"
+    json_path = tmp_path / "an1_published.json"
+
+    seeded = [
+        {
+            "post_id": str(i),
+            "version": "1.0",
+            "source_url": f"https://an1.com/{i}-app.html",
+            "title": f"App {i}",
+            "direct_download_url": None,
+            "dw_page_url": f"https://an1.com/file_{i}-dw.html",
+            "blogger_post_id": f"blogger-{i}",
+            "blogger_url": f"https://example.blogspot.com/{i}.html",
+            # Ascending timestamps, so post_id "0" is the oldest and the first row a
+            # truncating "ORDER BY published_at DESC LIMIT 500" would discard.
+            "published_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}+00:00",
+            "status": "LIVE",
+        }
+        for i in range(600)
+    ]
+    json_path.write_text(json.dumps(seeded), encoding="utf-8")
+
+    history = HistoryDB(db_path, json_tracker_path=json_path)
+    assert len(history.list_an1_posts(limit=None)) == 600
+
+    # Any publication rewrites the whole tracker file.
+    history.record_an1_publication(
+        post_id="new-post",
+        version="2.0",
+        source_url="https://an1.com/999-new.html",
+        title="Newly Published App",
+        dw_page_url="https://an1.com/file_999-dw.html",
+        blogger_post_id="blogger-999",
+        status="LIVE",
+    )
+
+    rewritten = json.loads(json_path.read_text(encoding="utf-8"))
+    assert len(rewritten) == 601
+    assert {"0", "1", "599", "new-post"} <= {item["post_id"] for item in rewritten}
+
+    # A fresh run rebuilding SQLite from that JSON still knows the oldest posts.
+    rebuilt = HistoryDB(tmp_path / "rebuilt.db", json_tracker_path=json_path)
+    assert rebuilt.is_an1_published("0", "1.0")
+    assert ("0", "1.0") in rebuilt.get_published_an1_keys()

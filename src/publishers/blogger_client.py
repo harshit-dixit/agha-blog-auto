@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,17 +21,17 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-3.5-flash"
     # Posts per batched review request. The free tier bills a per-day request count, so
     # batching is what keeps a run affordable; keep this small enough that one reply fits
     # inside the output-token ceiling and a truncated response costs only a few posts.
     GEMINI_BATCH_SIZE: int = 5
 
-    BLOGGER_BLOG_ID: Optional[str] = None
-    BLOGGER_CLIENT_ID: Optional[str] = None
-    BLOGGER_CLIENT_SECRET: Optional[str] = None
-    BLOGGER_REFRESH_TOKEN: Optional[str] = None
+    BLOGGER_BLOG_ID: str | None = None
+    BLOGGER_CLIENT_ID: str | None = None
+    BLOGGER_CLIENT_SECRET: str | None = None
+    BLOGGER_REFRESH_TOKEN: str | None = None
     BLOGGER_CLIENT_SECRET_FILE: str = "client_secret.json"
     BLOGGER_TOKEN_FILE: str = "token.json"
 

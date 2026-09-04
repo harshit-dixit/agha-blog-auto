@@ -1,0 +1,27 @@
+# Tooling configuration only. Dependencies stay in requirements.txt and the package is
+# run as a module (`python -m src.main`), so there is no build backend or project table.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"  # Matches the Python version the GitHub Actions workflow installs.
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes: undefined names, unused imports
+    "W",    # pycodestyle warnings
+    "I",    # isort: import ordering
+    "UP",   # pyupgrade: modern syntax for the target version
+    "B",    # flake8-bugbear: likely bugs
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The AN1 post template is one large HTML/CSS literal. Wrapping its lines would inject
+# whitespace into published markup, so line length is not meaningful inside it.
+"src/generators/an1_formatter.py" = ["E501"]
+# Every B904 here is `raise typer.Exit(code=1)` inside an except block. typer.Exit is CLI
+# control flow rather than an error, so chaining a cause onto it carries no information.
+"src/main.py" = ["B904"]

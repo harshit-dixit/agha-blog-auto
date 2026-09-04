@@ -4,7 +4,7 @@ import html
 import json
 import logging
 import re
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from google import genai
 from google.genai import types
@@ -90,7 +90,7 @@ INSTRUCTIONS (apply to every review independently):
 class AN1Formatter:
     """Formats an AN1 scraped post into a modern, mobile-responsive HTML post for Blogger."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings
         self._genai_client = None
         if self.settings and self.settings.GEMINI_API_KEY:
@@ -149,7 +149,7 @@ class AN1Formatter:
             return QuotaExhaustedError(message)
         return ContentEnhancementError(message)
 
-    def _enhance_with_gemini(self, post: AN1Post) -> Optional[str]:
+    def _enhance_with_gemini(self, post: AN1Post) -> str | None:
         """Generate original review prose via Gemini.
 
         Returns None only when Gemini is not configured. When it *is* configured, a failed
@@ -190,7 +190,7 @@ class AN1Formatter:
         return text
 
     @staticmethod
-    def _normalize_enhanced_text(raw_text: str) -> Optional[str]:
+    def _normalize_enhanced_text(raw_text: str) -> str | None:
         """Strip fences and any preamble, returning usable paragraph HTML or None."""
         text = raw_text.replace("```html", "").replace("```", "").strip()
 
@@ -314,7 +314,7 @@ class AN1Formatter:
                 items.append(candidate)
         return items
 
-    def format_html(self, post: AN1Post, enhanced_desc: Optional[str] = None) -> str:
+    def format_html(self, post: AN1Post, enhanced_desc: str | None = None) -> str:
         """Generate modern, fully responsive, standalone-styled HTML for Blogger post body."""
         app_name = html.escape(post.app_name)
         developer = html.escape(post.developer)

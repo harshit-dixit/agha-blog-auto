@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Optional
 
 from src.catalog import Topic, TopicCatalog
 
@@ -46,8 +46,8 @@ class PublishedPost:
     id: int
     topic_id: str
     title: str
-    url: Optional[str]
-    blogger_post_id: Optional[str]
+    url: str | None
+    blogger_post_id: str | None
     published_at: str
     status: str
     category: str
@@ -61,10 +61,10 @@ class AN1PublishedPost:
     version: str
     source_url: str
     title: str
-    direct_download_url: Optional[str]
-    dw_page_url: Optional[str]
-    blogger_post_id: Optional[str]
-    blogger_url: Optional[str]
+    direct_download_url: str | None
+    dw_page_url: str | None
+    blogger_post_id: str | None
+    blogger_url: str | None
     published_at: str
     status: str
 
@@ -72,7 +72,7 @@ class AN1PublishedPost:
 class HistoryDB:
     """SQLite-backed publication ledger used for duplicate detection and topic rotation."""
 
-    def __init__(self, db_path: Path, json_tracker_path: Optional[Path] = None):
+    def __init__(self, db_path: Path, json_tracker_path: Path | None = None):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.json_tracker_path = json_tracker_path or (self.db_path.parent / "an1_published.json")
@@ -115,13 +115,13 @@ class HistoryDB:
         *,
         topic_id: str,
         title: str,
-        url: Optional[str],
-        blogger_post_id: Optional[str],
+        url: str | None,
+        blogger_post_id: str | None,
         status: str,
         category: str,
         word_count: int,
     ) -> int:
-        published_at = datetime.now(timezone.utc).isoformat()
+        published_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -164,8 +164,8 @@ class HistoryDB:
         self,
         catalog: TopicCatalog,
         *,
-        category_id: Optional[str] = None,
-        topic_id: Optional[str] = None,
+        category_id: str | None = None,
+        topic_id: str | None = None,
     ) -> tuple[str, Topic]:
         """Pick the next unpublished topic, balancing rotation across categories."""
         published_ids = self.get_published_topic_ids()
@@ -230,14 +230,17 @@ class HistoryDB:
             if not isinstance(data, list):
                 raise ValueError(f"Expected list in {self.json_tracker_path}, got {type(data).__name__}")
         except Exception as exc:
-            raise RuntimeError(f"Corrupt or unreadable AN1 publication ledger at {self.json_tracker_path}: {exc}") from exc
+            raise RuntimeError(
+                f"Corrupt or unreadable AN1 publication ledger at {self.json_tracker_path}: {exc}"
+            ) from exc
 
         with self._connect() as conn:
             for item in data:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO an1_posts
-                        (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                        (post_id, version, source_url, title, direct_download_url,
+                         dw_page_url, blogger_post_id, blogger_url, published_at, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -249,14 +252,19 @@ class HistoryDB:
                         item.get("dw_page_url"),
                         item.get("blogger_post_id"),
                         item.get("blogger_url"),
-                        item.get("published_at", datetime.now(timezone.utc).isoformat()),
+                        item.get("published_at", datetime.now(UTC).isoformat()),
                         item.get("status", "LIVE"),
                     ),
                 )
 
     def _save_to_json_tracker(self) -> None:
-        """Export current AN1 publications to an1_published.json for persistent Git tracking."""
-        posts = self.list_an1_posts()
+        """Export current AN1 publications to an1_published.json for persistent Git tracking.
+
+        Reads the ledger unbounded: in CI the SQLite file is disposable and rebuilt from
+        this JSON each run, so any row missing here is a post that gets scraped, generated
+        and published a second time.
+        """
+        posts = self.list_an1_posts(limit=None)
         serialized = [
             {
                 "post_id": p.post_id,
@@ -275,7 +283,7 @@ class HistoryDB:
         self.json_tracker_path.parent.mkdir(parents=True, exist_ok=True)
         self.json_tracker_path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
 
-    def is_an1_published(self, post_id: str, version: Optional[str] = None) -> bool:
+    def is_an1_published(self, post_id: str, version: str | None = None) -> bool:
         """Check if an AN1 post ID (or specific version) has already been published."""
         with self._connect() as conn:
             if version is not None:
@@ -286,7 +294,7 @@ class HistoryDB:
                 row = conn.execute("SELECT 1 FROM an1_posts WHERE post_id = ?", (post_id,)).fetchone()
         return row is not None
 
-    def get_existing_blogger_post(self, post_id: str) -> Optional[AN1PublishedPost]:
+    def get_existing_blogger_post(self, post_id: str) -> AN1PublishedPost | None:
         """Return the most recent publication record for an AN1 post ID, if one exists."""
         with self._connect() as conn:
             row = conn.execute(
@@ -308,32 +316,43 @@ class HistoryDB:
         version: str,
         source_url: str,
         title: str,
-        direct_download_url: Optional[str] = None,
-        dw_page_url: Optional[str] = None,
-        blogger_post_id: Optional[str] = None,
-        blogger_url: Optional[str] = None,
+        direct_download_url: str | None = None,
+        dw_page_url: str | None = None,
+        blogger_post_id: str | None = None,
+        blogger_url: str | None = None,
         status: str = "LIVE",
     ) -> int:
         """Record an AN1 published article and sync to JSON tracker file."""
-        published_at = datetime.now(timezone.utc).isoformat()
+        published_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT OR REPLACE INTO an1_posts
-                    (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                    (post_id, version, source_url, title, direct_download_url,
+                     dw_page_url, blogger_post_id, blogger_url, published_at, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (post_id, version, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status),
+                (
+                    post_id, version, source_url, title, direct_download_url,
+                    dw_page_url, blogger_post_id, blogger_url, published_at, status,
+                ),
             )
             row_id = cursor.lastrowid or 0
         self._save_to_json_tracker()
         return row_id
 
-    def list_an1_posts(self, limit: int = 500) -> list[AN1PublishedPost]:
-        """List published AN1 posts in reverse chronological order."""
+    def list_an1_posts(self, limit: int | None = 500) -> list[AN1PublishedPost]:
+        """List published AN1 posts in reverse chronological order.
+
+        Pass limit=None for the complete ledger. Anything that rewrites the JSON tracker
+        must do so, because a truncated read would drop the oldest rows from the file and
+        those posts would look unpublished on the next run.
+        """
+        query = "SELECT * FROM an1_posts ORDER BY published_at DESC"
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (limit,)
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM an1_posts ORDER BY published_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [AN1PublishedPost(**dict(row)) for row in rows]

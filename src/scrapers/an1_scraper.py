@@ -5,7 +5,6 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -49,8 +48,8 @@ class AN1Post:
     description_html: str
     description_text: str
     screenshots: list[str] = field(default_factory=list)
-    dw_page_url: Optional[str] = None
-    direct_download_url: Optional[str] = None
+    dw_page_url: str | None = None
+    direct_download_url: str | None = None
 
 
 class AN1Scraper:
@@ -64,7 +63,7 @@ class AN1Scraper:
     def __init__(
         self,
         base_url: str = "https://an1.com",
-        session: Optional[requests.Session] = None,
+        session: requests.Session | None = None,
         timeout: int = 15,
         request_delay: float = 1.0,
         verify_direct_link: bool = True,
@@ -104,7 +103,7 @@ class AN1Scraper:
         slug = url.split("/")[-1].replace(".html", "")
         return slug
 
-    def _extract_next_page_url(self, soup: BeautifulSoup, current_url: str) -> Optional[str]:
+    def _extract_next_page_url(self, soup: BeautifulSoup, current_url: str) -> str | None:
         """Extract next page URL from navigation or pagination elements."""
         nav_more = soup.select_one("div.nav_more a")
         if nav_more and nav_more.get("href"):
@@ -126,7 +125,7 @@ class AN1Scraper:
     def fetch_latest_post_urls(
         self,
         limit: int = 20,
-        sources: Optional[list[str]] = None,
+        sources: list[str] | None = None,
         max_pages_per_source: int = 10,
     ) -> list[str]:
         """Fetch unique latest post URLs from key AN1 pages with pagination support.
@@ -142,7 +141,7 @@ class AN1Scraper:
         seen: set[str] = set()
 
         for source_url in sources:
-            current_url: Optional[str] = source_url
+            current_url: str | None = source_url
             page_count = 0
 
             while current_url and len(discovered_urls) < limit and page_count < max_pages_per_source:
@@ -166,13 +165,12 @@ class AN1Scraper:
                     if not href:
                         continue
                     full_url = urllib.parse.urljoin(self.base_url, href)
-                    if re.search(r"/\d+-[^/]+\.html$", full_url):
-                        if full_url not in seen:
-                            seen.add(full_url)
-                            discovered_urls.append(full_url)
-                            new_links_on_page += 1
-                            if len(discovered_urls) >= limit:
-                                return discovered_urls
+                    if re.search(r"/\d+-[^/]+\.html$", full_url) and full_url not in seen:
+                        seen.add(full_url)
+                        discovered_urls.append(full_url)
+                        new_links_on_page += 1
+                        if len(discovered_urls) >= limit:
+                            return discovered_urls
 
                 if new_links_on_page == 0:
                     break
@@ -306,12 +304,12 @@ class AN1Scraper:
 
         # Download Page URL
         dw_btn = soup.find("a", class_="download_line") or soup.find("a", class_="btn-green")
-        dw_page_url: Optional[str] = None
+        dw_page_url: str | None = None
         if dw_btn and dw_btn.get("href"):
             dw_page_url = urllib.parse.urljoin(self.base_url, dw_btn["href"])
 
         # Fetch direct download link from download page
-        direct_download_url: Optional[str] = None
+        direct_download_url: str | None = None
         if resolve_download and dw_page_url:
             direct_download_url = self._extract_direct_download_link(dw_page_url)
 
@@ -339,7 +337,7 @@ class AN1Scraper:
             direct_download_url=direct_download_url,
         )
 
-    def _extract_direct_download_link(self, dw_page_url: str) -> Optional[str]:
+    def _extract_direct_download_link(self, dw_page_url: str) -> str | None:
         """Visit the download page (e.g. /file_*-dw.html) and locate the real direct download link."""
         if self.request_delay > 0:
             time.sleep(self.request_delay)
@@ -352,7 +350,7 @@ class AN1Scraper:
             return None
 
         soup = BeautifulSoup(resp.text, "lxml")
-        candidate_url: Optional[str] = None
+        candidate_url: str | None = None
 
         # 1. Check <a id="pre_download" href="...">
         pre_dw = soup.find("a", id="pre_download")
@@ -381,7 +379,11 @@ class AN1Scraper:
             try:
                 head_resp = self.session.head(candidate_url, timeout=5, allow_redirects=True)
                 if head_resp.status_code not in (200, 206, 301, 302):
-                    logger.warning("Direct download link %s returned status %d; ignoring.", candidate_url, head_resp.status_code)
+                    logger.warning(
+                        "Direct download link %s returned status %d; ignoring.",
+                        candidate_url,
+                        head_resp.status_code,
+                    )
                     return None
             except requests.RequestException as exc:
                 logger.warning("Direct link HEAD check failed for %s: %s; ignoring.", candidate_url, exc)

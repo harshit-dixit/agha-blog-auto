@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
-from typing import Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -14,13 +14,13 @@ from config.settings import Settings
 SCOPES = ["https://www.googleapis.com/auth/blogger"]
 
 
-def _load_from_token_file(token_path: Path) -> Optional[Credentials]:
+def _load_from_token_file(token_path: Path) -> Credentials | None:
     if not token_path.exists():
         return None
     return Credentials.from_authorized_user_file(str(token_path), scopes=SCOPES)
 
 
-def _load_from_env(settings: Settings) -> Optional[Credentials]:
+def _load_from_env(settings: Settings) -> Credentials | None:
     if not (settings.BLOGGER_REFRESH_TOKEN and settings.BLOGGER_CLIENT_ID and settings.BLOGGER_CLIENT_SECRET):
         return None
     return Credentials(
@@ -64,10 +64,10 @@ def get_credentials(settings: Settings) -> Credentials:
                 "Run `python -m src.main auth --force` to re-authenticate."
             )
 
-    try:
+    # A read-only checkout (or a CI runner without a writable workspace) is fine here:
+    # the refreshed credentials are still returned, just not cached to disk.
+    with contextlib.suppress(OSError):
         _save_token(creds, settings.token_path)
-    except OSError:
-        pass
 
     return creds
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -30,9 +28,9 @@ console = Console()
 
 @app.command()
 def run(
-    category: Optional[str] = typer.Option(None, "--category", "-c", help="Restrict to a category id."),
-    topic_id: Optional[str] = typer.Option(None, "--topic-id", "-t", help="Publish a specific topic id."),
-    draft: Optional[bool] = typer.Option(
+    category: str | None = typer.Option(None, "--category", "-c", help="Restrict to a category id."),
+    topic_id: str | None = typer.Option(None, "--topic-id", "-t", help="Publish a specific topic id."),
+    draft: bool | None = typer.Option(
         None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
     ),
     dry_run: bool = typer.Option(
@@ -111,7 +109,7 @@ def run(
 @app.command(name="an1-post")
 def an1_post(
     url: str = typer.Argument(..., help="AN1 post URL to scrape and publish."),
-    draft: Optional[bool] = typer.Option(
+    draft: bool | None = typer.Option(
         None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
     ),
     dry_run: bool = typer.Option(
@@ -133,7 +131,13 @@ def an1_post(
             raise typer.Exit(code=1)
 
     if not dry_run and history.is_an1_published(post.post_id, post.version):
-        console.print(Panel(f"Post {post.app_name} v{post.version} has already been published to Blogger.", title="Already Published", style="yellow"))
+        console.print(
+            Panel(
+                f"Post {post.app_name} v{post.version} has already been published to Blogger.",
+                title="Already Published",
+                style="yellow",
+            )
+        )
         return
 
     with console.status("Resolving direct download link..."):
@@ -208,7 +212,11 @@ def an1_post(
     status_label = "DRAFT" if is_draft else "LIVE"
     console.print(
         Panel(
-            f"[bold]{title}[/]\nAction: {action_name}\nStatus: {status_label}\nBlogger URL: {result.get('url', 'n/a')}\nPrimary DW Page: {post.dw_page_url}",
+            f"[bold]{title}[/]\n"
+            f"Action: {action_name}\n"
+            f"Status: {status_label}\n"
+            f"Blogger URL: {result.get('url', 'n/a')}\n"
+            f"Primary DW Page: {post.dw_page_url}",
             title=f"AN1 Post {action_name}",
             style="green",
         )
@@ -218,13 +226,13 @@ def an1_post(
 @app.command(name="an1-sync")
 def an1_sync(
     limit: int = typer.Option(10, "--limit", "-l", help="Maximum number of new posts to publish in this run."),
-    draft: Optional[bool] = typer.Option(
+    draft: bool | None = typer.Option(
         None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Scrape and format without publishing."
     ),
-    source: Optional[str] = typer.Option(
+    source: str | None = typer.Option(
         None, "--source", "-s", help="Custom AN1 page or tag URL to crawl (defaults to https://an1.com/tags/mods/)."
     ),
 ) -> None:
@@ -249,7 +257,7 @@ def an1_sync(
     console.print(f"[bold cyan]Scanning {len(candidate_urls)} posts from AN1.com...[/]")
 
     # Hoist BloggerClient so authentication happens once
-    blogger: Optional[BloggerClient] = None
+    blogger: BloggerClient | None = None
     if not dry_run:
         try:
             blogger = BloggerClient(settings)
