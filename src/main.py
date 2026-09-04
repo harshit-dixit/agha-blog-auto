@@ -213,7 +213,7 @@ def an1_post(
 
 @app.command(name="an1-sync")
 def an1_sync(
-    limit: int = typer.Option(1, "--limit", "-l", help="Maximum number of new posts to publish in this run."),
+    limit: int = typer.Option(10, "--limit", "-l", help="Maximum number of new posts to publish in this run."),
     draft: Optional[bool] = typer.Option(
         None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
     ),
@@ -232,7 +232,7 @@ def an1_sync(
 
     with console.status("Checking AN1.com for latest posts..."):
         sources = [source] if source else None
-        discovered_urls = scraper.fetch_latest_post_urls(limit=40, sources=sources)
+        discovered_urls = scraper.fetch_latest_post_urls(limit=max(40, limit * 2), sources=sources)
 
     if not discovered_urls:
         console.print(Panel("Could not discover posts from AN1.com.", style="yellow"))

@@ -458,3 +458,75 @@ def test_cli_an1_sync_passes_custom_source(tmp_path: Path):
     assert result.exit_code == 0
     mock_fetch.assert_called_once_with(limit=40, sources=["https://an1.com/custom-tag/"])
 
+
+def test_cli_an1_sync_defaults_to_limit_10_and_handles_fewer_new_posts(tmp_path: Path):
+    db_path = tmp_path / "history.db"
+    history = HistoryDB(db_path)
+    # Pre-record post 1001 and 1002 as already published
+    history.record_an1_publication(
+        post_id="1001",
+        version="1.0",
+        source_url="https://an1.com/1001-game-1.html",
+        title="Game 1 Mod",
+        direct_download_url="https://an1.com/dl1",
+        dw_page_url="https://an1.com/dw1",
+        blogger_post_id="b1",
+        blogger_url="https://blog.com/1",
+        status="LIVE",
+    )
+    history.record_an1_publication(
+        post_id="1002",
+        version="1.0",
+        source_url="https://an1.com/1002-game-2.html",
+        title="Game 2 Mod",
+        direct_download_url="https://an1.com/dl2",
+        dw_page_url="https://an1.com/dw2",
+        blogger_post_id="b2",
+        blogger_url="https://blog.com/2",
+        status="LIVE",
+    )
+
+    discovered = [
+        "https://an1.com/1001-game-1.html",
+        "https://an1.com/1002-game-2.html",
+        "https://an1.com/1003-game-3.html",
+    ]
+
+    def mock_scrape(url, resolve_download=False):
+        pid = url.split("/")[-1].split("-")[0]
+        return AN1Post(
+            post_id=pid,
+            url=url,
+            title=f"Game {pid} (MOD, Unlimited Coins)",
+            app_name=f"Game {pid}",
+            icon_url="https://an1.com/img.png",
+            developer="Dev",
+            categories=["Action"],
+            version="1.0",
+            android_version="5.0 and up",
+            size="100 Mb",
+            updated_date="Today",
+            rating="4.5",
+            installs="10,000+",
+            mod_features="Unlimited Coins",
+            description_html="<p>Fun action game.</p>",
+            description_text="Fun action game.",
+            dw_page_url=f"https://an1.com/dw_{pid}.html",
+        )
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered) as mock_fetch, \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=mock_scrape), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.format_html", return_value="<p>Review content</p>"), \
+         patch("src.main.DB_PATH", db_path):
+        result = runner.invoke(app, ["an1-sync", "--dry-run"])
+
+    assert result.exit_code == 0
+    # Verified that default limit is 10 and dynamic discovery buffer was used
+    mock_fetch.assert_called_once_with(limit=40, sources=None)
+    # Output should show that only 1 post was processed (since 2 were already in history)
+    assert "Successfully processed 1 AN1 post(s)" in result.stdout
+
+
