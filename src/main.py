@@ -10,7 +10,7 @@ from rich.table import Table
 from config.settings import DB_PATH, TOPICS_FILE, get_settings
 from src.catalog import load_catalog
 from src.db.history import HistoryDB
-from src.generators.an1_formatter import AN1Formatter
+from src.generators.an1_formatter import AN1Formatter, ContentEnhancementError
 from src.generators.gaming_writer import ArticleTooShortError, GamingArticleWriter
 from src.publishers.blogger_client import BloggerClient
 from src.publishers.oauth_helper import export_secrets as build_export_secrets
@@ -122,7 +122,7 @@ def an1_post(
 
     with console.status(f"Scraping {url}..."):
         try:
-            post = scraper.scrape_post(url)
+            post = scraper.scrape_post(url, resolve_download=False)
             scraper.validate_post(post)
         except AN1ScraperError as exc:
             console.print(Panel(str(exc), title="Scrape or validation failed", style="red"))
@@ -132,9 +132,17 @@ def an1_post(
         console.print(Panel(f"Post {post.app_name} v{post.version} has already been published to Blogger.", title="Already Published", style="yellow"))
         return
 
+    with console.status("Resolving direct download link..."):
+        scraper.resolve_download_link(post)
+
     title = formatter.build_post_title(post)
     labels = formatter.build_labels(post)
-    html_content = formatter.format_html(post)
+    try:
+        with console.status("Generating article content..."):
+            html_content = formatter.format_html(post)
+    except ContentEnhancementError as exc:
+        console.print(Panel(str(exc), title="Content generation failed", style="red"))
+        raise typer.Exit(code=1)
 
     console.print(
         f"[green]Scraped & Formatted[/] '[bold]{post.app_name}[/]' (v{post.version}) — "
@@ -242,16 +250,19 @@ def an1_sync(
             raise typer.Exit(code=1)
 
     published_count = 0
+    failed_count = 0
 
     for url in candidate_urls:
         if published_count >= limit:
             break
 
         with console.status(f"Processing {url}..."):
+            # Scraped without the download page so already-published posts cost one request.
             try:
-                post = scraper.scrape_post(url)
+                post = scraper.scrape_post(url, resolve_download=False)
                 scraper.validate_post(post)
             except AN1ScraperError as exc:
+                failed_count += 1
                 console.print(f"[yellow]Skipping {url} (validation/scrape error):[/] {exc}")
                 continue
 
@@ -259,9 +270,16 @@ def an1_sync(
             if (post.post_id, post.version) in published_keys or history.is_an1_published(post.post_id, post.version):
                 continue
 
+            scraper.resolve_download_link(post)
+
             title = formatter.build_post_title(post)
             labels = formatter.build_labels(post)
-            html_content = formatter.format_html(post)
+            try:
+                html_content = formatter.format_html(post)
+            except ContentEnhancementError as exc:
+                failed_count += 1
+                console.print(f"[yellow]Skipping {title} (content generation failed):[/] {exc}")
+                continue
 
             is_draft = draft if draft is not None else settings.DEFAULT_PUBLISH_STATUS == "DRAFT"
 
@@ -311,10 +329,27 @@ def an1_sync(
             published_count += 1
             console.print(f"[green]{action}:[/] {title} -> {result.get('url', 'n/a')}")
 
+    # Nothing published *and* posts failed means the pipeline is broken (most likely an AN1
+    # markup change), not that the backlog is simply empty. Fail the run so CI reports it
+    # instead of showing a green "nothing new" forever.
+    if failed_count and published_count == 0:
+        console.print(
+            Panel(
+                f"{failed_count} of {len(candidate_urls)} discovered post(s) failed scraping, validation, "
+                "or content generation, and nothing was published. AN1 markup may have changed.",
+                title="Sync failed",
+                style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+
     if published_count == 0:
         console.print(Panel("No new unpublished posts or version updates found on AN1.com.", style="green"))
     else:
-        console.print(Panel(f"Successfully processed {published_count} AN1 post(s).", style="green"))
+        summary = f"Successfully processed {published_count} AN1 post(s)."
+        if failed_count:
+            summary += f" {failed_count} post(s) skipped after errors."
+        console.print(Panel(summary, style="green"))
 
 
 @app.command()

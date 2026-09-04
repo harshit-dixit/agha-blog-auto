@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Optional
 
 from google import genai
@@ -11,6 +12,18 @@ from config.settings import Settings
 from src.scrapers.an1_scraper import AN1Post
 
 logger = logging.getLogger(__name__)
+
+# Minimum usable length for generated prose; shorter output means the model bailed out.
+MIN_ENHANCED_LENGTH = 200
+
+
+class ContentEnhancementError(RuntimeError):
+    """Raised when Gemini is configured but could not produce usable original prose.
+
+    Publishing the scraped description verbatim is the failure mode this guards against,
+    so callers should skip the post rather than fall back to it.
+    """
+
 
 GEMINI_ENHANCE_PROMPT = """You are a senior gaming journalist and app reviewer for Android Game Hack Area.
 Write a comprehensive, engaging, and original app review for the following Android game/application based on its metadata:
@@ -69,7 +82,12 @@ class AN1Formatter:
         return list(dict.fromkeys(labels))[:8]
 
     def _enhance_with_gemini(self, post: AN1Post) -> Optional[str]:
-        """Optionally generate original, engaging review prose via Gemini."""
+        """Generate original review prose via Gemini.
+
+        Returns None only when Gemini is not configured. When it *is* configured, a failed
+        or unusable generation raises ContentEnhancementError instead of quietly falling
+        back to the scraped description, which would republish AN1's text verbatim.
+        """
         if not self._genai_client or not self.settings:
             return None
 
@@ -90,15 +108,33 @@ class AN1Formatter:
                     temperature=0.7,
                 ),
             )
-            text = response.text.strip()
-            # Basic cleanup of any accidental markdown fences
-            text = text.replace("```html", "").replace("```", "").strip()
-            if text.startswith("<p>") and len(text) > 200:
-                return text
+            raw_text = response.text or ""
         except Exception as exc:
-            logger.warning("Gemini enhancement failed for %s: %s; falling back to template text.", post.app_name, exc)
+            raise ContentEnhancementError(
+                f"Gemini enhancement failed for {post.app_name!r}: {exc}"
+            ) from exc
 
-        return None
+        text = self._normalize_enhanced_text(raw_text)
+        if not text:
+            raise ContentEnhancementError(
+                f"Gemini returned unusable prose for {post.app_name!r} "
+                f"({len(raw_text.strip())} chars, no usable <p> block)"
+            )
+        return text
+
+    @staticmethod
+    def _normalize_enhanced_text(raw_text: str) -> Optional[str]:
+        """Strip fences and any preamble, returning usable paragraph HTML or None."""
+        text = raw_text.replace("```html", "").replace("```", "").strip()
+
+        # Drop any lead-in prose before the first paragraph tag ("Here is the review:" etc.)
+        first_p = re.search(r"<p[\s>]", text, re.I)
+        if first_p:
+            text = text[first_p.start():].strip()
+
+        if not text.lower().startswith("<p") or len(text) < MIN_ENHANCED_LENGTH:
+            return None
+        return text
 
     def format_html(self, post: AN1Post) -> str:
         """Generate modern, fully responsive, standalone-styled HTML for Blogger post body."""
@@ -111,6 +147,12 @@ class AN1Formatter:
         mod_features = html.escape(post.mod_features)
         rating = html.escape(post.rating or "4.8")
         installs = html.escape(post.installs or "1,000,000+")
+
+        # File size is dropped from button and CTA labels when parsing produced the sentinel,
+        # so a button never reads "Download APK (Unknown)".
+        size_known = bool(post.size) and post.size.strip().lower() not in ("unknown", "n/a", "-")
+        size_label = f" ({size})" if size_known else ""
+        size_meta_line = f"Version {version} • File Size {size}" if size_known else f"Version {version}"
 
         # Primary download link: Stable AN1 download page
         primary_link = post.dw_page_url or post.url
@@ -135,7 +177,8 @@ class AN1Formatter:
             </div>
             """
 
-        # Description text: try Gemini original text first, otherwise fallback to structured parsed text
+        # Original prose from Gemini when configured; the scraped-text fallback below is
+        # only reached when no Gemini key is set (a failed generation raises instead).
         enhanced_desc = self._enhance_with_gemini(post)
         if enhanced_desc:
             desc_formatted = enhanced_desc
@@ -150,7 +193,7 @@ class AN1Formatter:
         # Build download buttons (Inverted order: AN1 stable page as primary, direct APK as secondary mirror)
         primary_btn_html = f"""
         <a href="{html.escape(primary_link)}" class="agha-btn agha-btn-primary" target="_blank" rel="noopener nofollow">
-            <span>⬇ Download APK ({size})</span>
+            <span>⬇ Download APK{size_label}</span>
         </a>
         """
 
@@ -436,7 +479,7 @@ class AN1Formatter:
     <!-- Quick CTA Top -->
     <div class="agha-cta-box">
         <div style="font-weight: 700; font-size: 17px; color: #0f172a;">Get {app_name} MOD APK for Android</div>
-        <div style="font-size: 13px; color: #64748b; margin-top: 2px;">Version {version} • File Size {size}</div>
+        <div style="font-size: 13px; color: #64748b; margin-top: 2px;">{size_meta_line}</div>
         <div class="agha-btn-group">
             {primary_btn_html}
             {mirror_btn_html}

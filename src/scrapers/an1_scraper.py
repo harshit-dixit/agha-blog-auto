@@ -147,8 +147,14 @@ class AN1Scraper:
 
         return discovered_urls
 
-    def scrape_post(self, url: str) -> AN1Post:
-        """Scrape full post details, download page redirect, and direct APK link."""
+    def scrape_post(self, url: str, *, resolve_download: bool = True) -> AN1Post:
+        """Scrape post details and the download page redirect.
+
+        Pass resolve_download=False to skip fetching the /file_*-dw.html page and the
+        direct-link HEAD check. Callers that de-duplicate against the publication ledger
+        should do that, then call resolve_download_link() only for posts they will publish,
+        so already-seen posts cost one request instead of three.
+        """
         if self.request_delay > 0:
             time.sleep(self.request_delay)
 
@@ -269,7 +275,7 @@ class AN1Scraper:
 
         # Fetch direct download link from download page
         direct_download_url: Optional[str] = None
-        if dw_page_url:
+        if resolve_download and dw_page_url:
             direct_download_url = self._extract_direct_download_link(dw_page_url)
 
         return AN1Post(
@@ -280,7 +286,9 @@ class AN1Scraper:
             icon_url=icon_url,
             developer=developer,
             categories=categories,
-            version=version or "1.0",
+            # Left empty when parsing fails so validate_post() rejects the post instead of
+            # silently stamping every post with the same placeholder version.
+            version=version,
             android_version=android_version,
             size=size,
             updated_date=updated_date,
@@ -343,6 +351,13 @@ class AN1Scraper:
                 return None
 
         return candidate_url
+
+    def resolve_download_link(self, post: AN1Post) -> AN1Post:
+        """Attach the direct APK link to a post scraped with resolve_download=False."""
+        if post.direct_download_url or not post.dw_page_url:
+            return post
+        post.direct_download_url = self._extract_direct_download_link(post.dw_page_url)
+        return post
 
     def validate_post(self, post: AN1Post) -> None:
         """Strict validation gate: ensure post is completely and reliably parsed before publishing."""

@@ -81,6 +81,9 @@ jobs:
           fi
 
       - name: Commit and push publication ledger
+        # always(): if the pipeline publishes some posts and then fails, the ledger still
+        # has to be persisted or those posts get republished on the next run.
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
