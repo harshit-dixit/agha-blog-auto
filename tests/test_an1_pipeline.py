@@ -146,15 +146,51 @@ def test_formatter_inverts_buttons_and_removes_unverified_claims(sample_post: AN
     assert "Subway Surfers" in title
     assert "MOD APK" in labels
 
-    # Primary button must link to the stable AN1 download page
-    assert f'href="{sample_post.dw_page_url}" class="agha-btn agha-btn-primary"' in html_content
+    # Primary button must link to the stable AN1 download page with AGHA theme class
+    assert f'href="{sample_post.dw_page_url}" class="dl-btn"' in html_content
 
-    # Secondary mirror must link to the direct APK
-    assert f'href="{sample_post.direct_download_url}" class="agha-btn agha-btn-secondary"' in html_content
+    # Secondary mirror must link to the direct APK with AGHA pink alt button class
+    assert f'href="{sample_post.direct_download_url}" class="dl-btn alt"' in html_content
 
     # Unverified claims must be removed
     assert "Verified Clean • No Malware" not in html_content
     assert "verified to be virus-free" not in html_content
+
+
+def test_formatter_conforms_to_agha_clay_design_system(sample_post: AN1Post):
+    """Verify that generated post HTML matches the AGHA Theme Design System."""
+    formatter = AN1Formatter()
+    html_content = formatter.format_html(sample_post)
+
+    # Theme native component classes
+    assert 'class="app-head"' in html_content
+    assert 'class="app-box"' in html_content
+    assert 'class="app-row"' in html_content
+    assert 'class="screens"' in html_content
+    assert 'class="steps"' in html_content
+    assert 'class="faq"' in html_content
+    assert 'class="notice"' in html_content
+
+    # AGHA Theme saturated pills following contrast rules
+    assert 'class="pill pill-pink"' in html_content
+    assert 'class="pill pill-teal"' in html_content
+    assert 'class="pill pill-ochre"' in html_content
+
+    # AGHA Design tokens present
+    assert "--canvas: #fffaf0" in html_content
+    assert "--card: #f5f0e0" in html_content
+    assert "--primary: #0a0a0a" in html_content
+    assert "--pink: #ff4d8b" in html_content
+    assert "--teal: #1a3a3a" in html_content
+    assert "--lav: #b8a4ed" in html_content
+    assert "--ochre: #e8b94a" in html_content
+
+    # Disallowed dark slate and neon green themes must not be present
+    assert "#0f172a" not in html_content
+    assert "#1e293b" not in html_content
+    assert "#10b981" not in html_content
+    assert "badge-green" not in html_content
+    assert "badge-blue" not in html_content
 
 
 def test_history_db_version_tracking_and_corrupt_ledger_handling(tmp_path: Path, sample_post: AN1Post):

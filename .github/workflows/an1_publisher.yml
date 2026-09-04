@@ -41,6 +41,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load publication ledger from ledger branch
+        run: |
+          mkdir -p data
+          if git ls-remote --exit-code --heads origin ledger > /dev/null 2>&1; then
+            echo "Fetching ledger from origin/ledger..."
+            git fetch origin ledger:refs/remotes/origin/ledger
+            git checkout origin/ledger -- data/an1_published.json 2>/dev/null || echo "data/an1_published.json not found on ledger branch yet; using repository state."
+          else
+            echo "Ledger branch not found on origin; using repository state."
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -89,19 +102,34 @@ jobs:
             python -m src.main an1-sync --limit "$LIMIT" $MODE_FLAG $SOURCE_FLAG
           fi
 
-      - name: Commit and push publication ledger
+      - name: Commit and push publication ledger to ledger branch
         # always(): if the pipeline publishes some posts and then fails, the ledger still
         # has to be persisted or those posts get republished on the next run.
         if: always()
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           if [ -f data/an1_published.json ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+            # Stash updated ledger temporarily
+            cp data/an1_published.json /tmp/an1_published.json
+
+            # Switch to ledger branch
+            git fetch origin ledger
+            git checkout -B ledger origin/ledger || git checkout -B ledger
+
+            # Restore updated ledger file on ledger branch
+            mkdir -p data
+            cp /tmp/an1_published.json data/an1_published.json
             git add data/an1_published.json
+
             if ! git diff --staged --quiet; then
               git commit -m "Update AN1 published posts ledger [skip ci]"
-              git pull --rebase --autostash && git push
+              git pull --rebase --autostash origin ledger 2>/dev/null || true
+              git push origin ledger
+              echo "Successfully pushed updated ledger to ledger branch."
             else
               echo "No new publications to commit."
             fi
           fi
+

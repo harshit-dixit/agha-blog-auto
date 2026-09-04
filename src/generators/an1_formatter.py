@@ -106,6 +106,7 @@ class AN1Formatter:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.7,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
             raw_text = response.text or ""
@@ -159,19 +160,48 @@ class AN1Formatter:
         # Secondary download link: Direct APK mirror (if resolved and verified)
         mirror_link = post.direct_download_url if (post.direct_download_url and post.direct_download_url != primary_link) else None
 
-        # Build screenshots HTML
+        # Build download buttons (Primary: near-black #0a0a0a; Secondary mirror: pink #ff4d8b)
+        primary_btn_html = f"""
+        <a href="{html.escape(primary_link)}" class="dl-btn" target="_blank" rel="noopener nofollow">
+            <span>Download APK{size_label}</span>
+        </a>
+        """
+
+        mirror_btn_html = ""
+        if mirror_link:
+            mirror_btn_html = f"""
+            <a href="{html.escape(mirror_link)}" class="dl-btn alt" target="_blank" rel="noopener nofollow">
+                <span>⚡ Direct APK Mirror</span>
+            </a>
+            """
+
+        if mirror_link:
+            btn_group_html = f"""
+            <div class="dl-row">
+                {primary_btn_html}
+                {mirror_btn_html}
+            </div>
+            """
+        else:
+            btn_group_html = f"""
+            <div class="dl-wrap">
+                {primary_btn_html}
+            </div>
+            """
+
+        # Build screenshots HTML with theme-native .screens snap-scroller
         screenshots_html = ""
         if post.screenshots:
             items = []
             for img_url in post.screenshots[:6]:
                 safe_img = html.escape(img_url)
                 items.append(
-                    f'<div class="agha-shot"><img src="{safe_img}" alt="{app_name} Screenshot" loading="lazy" /></div>'
+                    f'<img src="{safe_img}" alt="{app_name} Screenshot" loading="lazy" />'
                 )
             screenshots_html = f"""
-            <div class="agha-section">
-                <h3 class="agha-subtitle">📸 In-Game Screenshots</h3>
-                <div class="agha-gallery">
+            <div class="post-section">
+                <h2>📸 In-Game Screenshots</h2>
+                <div class="screens">
                     {''.join(items)}
                 </div>
             </div>
@@ -184,351 +214,479 @@ class AN1Formatter:
             desc_formatted = enhanced_desc
         else:
             desc_text = post.description_text or "Download the latest modified version with unlocked features and unlimited resources."
-            # Split paragraphs cleanly by newline or sentence blocks
             raw_blocks = [b.strip() for b in desc_text.split("\n\n") if b.strip()]
             if not raw_blocks:
                 raw_blocks = [desc_text]
             desc_formatted = "".join(f"<p>{html.escape(b)}</p>" for b in raw_blocks)
 
-        # Build download buttons (Inverted order: AN1 stable page as primary, direct APK as secondary mirror)
-        primary_btn_html = f"""
-        <a href="{html.escape(primary_link)}" class="agha-btn agha-btn-primary" target="_blank" rel="noopener nofollow">
-            <span>⬇ Download APK{size_label}</span>
-        </a>
-        """
-
-        mirror_btn_html = ""
-        if mirror_link:
-            mirror_btn_html = f"""
-            <a href="{html.escape(mirror_link)}" class="agha-btn agha-btn-secondary" target="_blank" rel="noopener nofollow">
-                <span>⚡ Direct APK Mirror</span>
-            </a>
-            """
-
         html_body = f"""
-<div class="agha-article">
+<div class="post-content agha-clay-post">
     <style>
-        .agha-article {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            color: #1e293b;
-            line-height: 1.65;
+        :root, .agha-clay-post {{
+            --canvas: #fffaf0;
+            --soft: #faf5e8;
+            --card: #f5f0e0;
+            --strong: #ebe6d6;
+            --hair: #e5e5e5;
+            --ink: #0a0a0a;
+            --body-strong: #1a1a1a;
+            --body: #3a3a3a;
+            --muted: #6a6a6a;
+            --muted-soft: #9a9a9a;
+            --on-dark: #ffffff;
+            --primary: #0a0a0a;
+            --pink: #ff4d8b;
+            --teal: #1a3a3a;
+            --lav: #b8a4ed;
+            --peach: #ffb084;
+            --ochre: #e8b94a;
+            --mint: #a4d4c5;
+            --coral: #ff6b5a;
+            --ok: #22c55e;
+            --warn: #f59e0b;
+            --err: #ef4444;
+            --r-xs: 6px;
+            --r-sm: 8px;
+            --r-md: 12px;
+            --r-lg: 16px;
+            --r-xl: 24px;
+            --r-pill: 9999px;
+            --r-full: 50%;
+            --sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --lift: 0 8px 24px rgba(10, 26, 26, 0.08);
+        }}
+        .agha-clay-post {{
+            font-family: var(--sans);
+            color: var(--body);
+            font-size: 17px;
+            line-height: 1.7;
             max-width: 800px;
             margin: 0 auto;
-            font-size: 16px;
+            -webkit-font-smoothing: antialiased;
         }}
-        .agha-hero {{
-            display: flex;
-            align-items: center;
-            gap: 20px;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            color: #ffffff;
-            padding: 24px;
-            border-radius: 18px;
-            box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.25);
-            margin-bottom: 24px;
-        }}
-        .agha-hero-icon {{
-            width: 90px;
-            height: 90px;
-            border-radius: 18px;
-            object-fit: cover;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
-            flex-shrink: 0;
-            background: #334155;
-        }}
-        .agha-hero-info {{
-            flex: 1;
-        }}
-        .agha-hero-title {{
-            font-size: 22px;
-            font-weight: 700;
-            margin: 0 0 8px 0;
-            color: #ffffff;
+        .agha-clay-post h2 {{
+            font-size: 24px;
+            font-weight: 500;
             line-height: 1.25;
+            letter-spacing: -0.025em;
+            color: var(--ink);
+            margin: 1.8em 0 0.6em;
         }}
-        .agha-tags {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 8px;
-        }}
-        .agha-badge {{
-            font-size: 12px;
-            font-weight: 600;
-            padding: 4px 10px;
-            border-radius: 20px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        .badge-green {{
-            background: #10b981;
-            color: #ffffff;
-        }}
-        .badge-blue {{
-            background: #3b82f6;
-            color: #ffffff;
-        }}
-        .badge-dark {{
-            background: rgba(255,255,255,0.15);
-            color: #f1f5f9;
-        }}
-        .agha-hero-meta {{
-            font-size: 13px;
-            color: #94a3b8;
+        .agha-clay-post p {{
+            margin: 0 0 1.15em;
+            color: var(--body);
         }}
 
-        /* CTA Download Box */
-        .agha-cta-box {{
-            background: #f8fafc;
-            border: 2px dashed #cbd5e1;
-            border-radius: 16px;
-            padding: 20px;
-            text-align: center;
-            margin: 24px 0;
+        /* App Header Card (.app-head) */
+        .agha-clay-post .app-head {{
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            background: var(--card);
+            border: 1px solid var(--hair);
+            border-radius: var(--r-lg);
+            padding: 18px;
+            margin: 0 0 24px 0;
         }}
-        .agha-btn-group {{
+        .agha-clay-post .app-icon {{
+            width: 76px;
+            height: 76px;
+            border-radius: var(--r-md);
+            object-fit: cover;
+            flex: 0 0 auto;
+            background: var(--soft);
+        }}
+        .agha-clay-post .app-head-info {{
+            flex: 1;
+            min-width: 0;
+        }}
+        .agha-clay-post .app-badges {{
             display: flex;
             flex-wrap: wrap;
-            gap: 12px;
-            justify-content: center;
-            margin-top: 14px;
+            gap: 6px;
+            margin-bottom: 6px;
         }}
-        .agha-btn {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            padding: 14px 28px;
-            font-size: 16px;
-            font-weight: 700;
-            text-decoration: none !important;
-            border-radius: 12px;
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-            cursor: pointer;
-        }}
-        .agha-btn:hover {{
-            transform: translateY(-2px);
-        }}
-        .agha-btn-primary {{
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            color: #ffffff !important;
-            box-shadow: 0 8px 20px -4px rgba(16, 185, 129, 0.45);
-        }}
-        .agha-btn-secondary {{
-            background: #e2e8f0;
-            color: #1e293b !important;
-        }}
-        .agha-safe-check {{
+        .agha-clay-post .pill {{
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            font-size: 13px;
-            color: #059669;
+            padding: 4px 12px;
+            border-radius: var(--r-pill);
+            background: var(--card);
+            color: var(--ink);
+            font: 500 12px/1.4 var(--sans);
+            white-space: nowrap;
+        }}
+        .agha-clay-post .pill-pink {{
+            background: var(--pink);
+            color: var(--on-dark);
+        }}
+        .agha-clay-post .pill-teal {{
+            background: var(--teal);
+            color: var(--on-dark);
+        }}
+        .agha-clay-post .pill-ochre {{
+            background: var(--ochre);
+            color: var(--ink);
+        }}
+        .agha-clay-post .pill-dot {{
+            width: 6px;
+            height: 6px;
+            border-radius: var(--r-full);
+            background: currentColor;
+            opacity: 0.7;
+        }}
+        .agha-clay-post .an {{
+            font-size: 20px;
             font-weight: 600;
-            margin-top: 10px;
+            letter-spacing: -0.015em;
+            color: var(--ink);
+            line-height: 1.25;
+            margin: 0 0 4px 0;
+        }}
+        .agha-clay-post .am {{
+            font-size: 13px;
+            color: var(--muted);
         }}
 
-        /* Specs Grid */
-        .agha-specs-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-            gap: 12px;
+        /* Download CTA Card (.dl-card) */
+        .agha-clay-post .dl-card {{
+            background: var(--card);
+            border: 1px solid var(--hair);
+            border-radius: var(--r-lg);
+            padding: 22px;
+            text-align: center;
             margin: 24px 0;
         }}
-        .agha-spec-card {{
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            padding: 12px 14px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-        }}
-        .agha-spec-label {{
-            font-size: 12px;
-            color: #64748b;
-            text-transform: uppercase;
+        .agha-clay-post .dl-card-title {{
+            font-size: 18px;
             font-weight: 600;
+            color: var(--ink);
+            letter-spacing: -0.01em;
             margin-bottom: 4px;
         }}
-        .agha-spec-val {{
-            font-size: 14px;
-            font-weight: 700;
-            color: #0f172a;
+        .agha-clay-post .dl-card-sub {{
+            font-size: 13px;
+            color: var(--muted);
+        }}
+        .agha-clay-post .dl-wrap {{
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 14px;
+        }}
+        .agha-clay-post .dl-row {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 14px;
+        }}
+        .agha-clay-post .dl-btn {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 52px;
+            padding: 14px 24px;
+            border-radius: var(--r-md);
+            background: var(--primary);
+            color: var(--on-dark) !important;
+            font: 600 15px/1.2 var(--sans);
+            text-decoration: none !important;
+            text-align: center;
+            transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+            cursor: pointer;
+        }}
+        .agha-clay-post .dl-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: var(--lift);
+            color: var(--on-dark) !important;
+        }}
+        .agha-clay-post .dl-btn::after {{
+            content: "\\2193";
+            font-size: 16px;
+            font-weight: 600;
+            opacity: 0.9;
+        }}
+        .agha-clay-post .dl-btn.alt {{
+            background: var(--pink);
+            color: var(--on-dark) !important;
+        }}
+        .agha-clay-post .dl-btn.alt:hover {{
+            background: #e63e79;
         }}
 
-        /* MOD Box */
-        .agha-mod-card {{
-            background: #ecfdf5;
-            border-left: 4px solid #10b981;
-            border-radius: 0 12px 12px 0;
-            padding: 16px 20px;
+        /* MOD Callout Notice (.notice) */
+        .agha-clay-post .notice {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
             margin: 24px 0;
+            padding: 16px 20px;
+            background: var(--card);
+            border-radius: var(--r-md);
+            border-left: 4px solid var(--lav);
+            font-size: 15px;
+            line-height: 1.6;
         }}
-        .agha-mod-title {{
-            font-size: 16px;
-            font-weight: 700;
-            color: #065f46;
-            margin: 0 0 6px 0;
+        .agha-clay-post .notice-title {{
+            font-weight: 600;
+            font-size: 15px;
+            color: var(--ink);
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }}
-        .agha-mod-desc {{
-            color: #047857;
+        .agha-clay-post .notice-desc {{
             margin: 0;
+            color: var(--body);
             font-size: 14px;
             font-weight: 500;
         }}
 
-        /* Sections */
-        .agha-section {{
-            margin: 28px 0;
+        /* App Specifications (.app-box) */
+        .agha-clay-post .app-box {{
+            background: var(--card);
+            border: 1px solid var(--hair);
+            border-radius: var(--r-lg);
+            padding: 8px 24px;
+            margin: 16px 0 24px;
+            font-size: 15px;
         }}
-        .agha-subtitle {{
-            font-size: 18px;
-            font-weight: 700;
-            color: #0f172a;
-            margin: 0 0 12px 0;
-            border-bottom: 2px solid #f1f5f9;
-            padding-bottom: 8px;
+        .agha-clay-post .app-row {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: baseline;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(10, 10, 10, 0.08);
+        }}
+        .agha-clay-post .app-row:last-child {{
+            border-bottom: 0;
+        }}
+        .agha-clay-post .app-row span {{
+            flex: 0 0 40%;
+            max-width: 190px;
+            font-weight: 500;
+            color: var(--muted);
+        }}
+        .agha-clay-post .app-row b {{
+            font-weight: 600;
+            color: var(--ink);
         }}
 
-        /* Gallery */
-        .agha-gallery {{
+        /* Screenshot Scroller (.screens) */
+        .agha-clay-post .screens {{
             display: flex;
             gap: 12px;
             overflow-x: auto;
-            padding-bottom: 10px;
+            margin: 16px 0 24px;
+            padding-bottom: 8px;
             scroll-snap-type: x mandatory;
+            scrollbar-width: none;
         }}
-        .agha-shot {{
-            flex: 0 0 160px;
-            scroll-snap-align: start;
+        .agha-clay-post .screens::-webkit-scrollbar {{
+            display: none;
         }}
-        .agha-shot img {{
-            width: 100%;
-            height: 280px;
+        .agha-clay-post .screens img {{
+            flex: 0 0 auto;
+            width: 180px;
+            height: 320px;
             object-fit: cover;
-            border-radius: 12px;
-            border: 1px solid #e2e8f0;
-            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+            scroll-snap-align: start;
+            border-radius: var(--r-md);
+            border: 1px solid var(--hair);
+            margin: 0 !important;
         }}
 
-        /* Guide Steps */
-        .agha-steps {{
-            padding-left: 20px;
-            margin: 12px 0;
+        /* Installation Steps (.steps) with Ochre Clay Discs */
+        .agha-clay-post .steps {{
+            counter-reset: st;
+            list-style: none;
+            margin: 16px 0 24px;
+            padding: 0;
         }}
-        .agha-steps li {{
-            margin-bottom: 8px;
-            color: #334155;
+        .agha-clay-post .steps li {{
+            position: relative;
+            counter-increment: st;
+            padding: 0 0 16px 50px;
+            font-size: 15px;
+            line-height: 1.6;
+            color: var(--body);
+        }}
+        .agha-clay-post .steps li::before {{
+            content: counter(st);
+            position: absolute;
+            left: 0;
+            top: -2px;
+            width: 34px;
+            height: 34px;
+            border-radius: var(--r-full);
+            background: var(--ochre);
+            color: var(--ink);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font: 600 15px/1 var(--sans);
+        }}
+        .agha-clay-post .steps li:last-child {{
+            padding-bottom: 0;
         }}
 
-        /* FAQ */
-        .agha-faq-item {{
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            padding: 12px 16px;
+        /* FAQ Accordion (.faq) */
+        .agha-clay-post .faq {{
+            margin: 16px 0 24px;
+        }}
+        .agha-clay-post .faq details {{
+            background: var(--card);
+            border: 1px solid var(--hair);
+            border-radius: var(--r-md);
+            padding: 14px 18px;
             margin-bottom: 10px;
         }}
-        .agha-faq-q {{
-            font-weight: 700;
-            color: #0f172a;
-            font-size: 15px;
-            margin-bottom: 4px;
+        .agha-clay-post .faq summary {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            list-style: none;
+            font: 600 15px/1.45 var(--sans);
+            color: var(--ink);
         }}
-        .agha-faq-a {{
-            color: #475569;
+        .agha-clay-post .faq summary::-webkit-details-marker {{
+            display: none;
+        }}
+        .agha-clay-post .faq summary::after {{
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-right: 2px solid var(--muted);
+            border-bottom: 2px solid var(--muted);
+            transform: rotate(45deg);
+            margin-left: auto;
+            flex: 0 0 auto;
+            transition: transform 0.18s ease;
+        }}
+        .agha-clay-post .faq details[open] summary::after {{
+            transform: rotate(-135deg);
+        }}
+        .agha-clay-post .faq details > *:not(summary) {{
+            margin-top: 10px;
             font-size: 14px;
-            margin: 0;
+            line-height: 1.6;
+            color: var(--body);
         }}
 
-        @media (max-width: 600px) {{
-            .agha-hero {{
+        /* Pre-Footer Bottom CTA Card */
+        .agha-clay-post .bottom-cta {{
+            background: var(--soft);
+            border: 1px solid var(--hair);
+            border-radius: var(--r-xl);
+            padding: 30px 24px;
+            text-align: center;
+            margin: 36px 0 16px;
+        }}
+        .agha-clay-post .bottom-cta h3 {{
+            font-size: 22px;
+            font-weight: 500;
+            letter-spacing: -0.02em;
+            color: var(--ink);
+            margin: 0 0 6px 0;
+        }}
+        .agha-clay-post .bottom-cta p {{
+            font-size: 14px;
+            color: var(--muted);
+            margin: 0 0 16px 0;
+        }}
+        .agha-clay-post .disclaimer {{
+            font-size: 12px !important;
+            color: var(--muted-soft) !important;
+            margin: 16px 0 0 0 !important;
+            line-height: 1.5;
+        }}
+
+        @media (max-width: 640px) {{
+            .agha-clay-post .app-head {{
                 flex-direction: column;
                 text-align: center;
-                gap: 14px;
             }}
-            .agha-hero-icon {{
-                width: 80px;
-                height: 80px;
-            }}
-            .agha-tags {{
+            .agha-clay-post .app-badges {{
                 justify-content: center;
             }}
-            .agha-btn {{
-                width: 100%;
+            .agha-clay-post .dl-row {{
+                grid-template-columns: 1fr;
+            }}
+            .agha-clay-post .app-row span {{
+                flex: 1 1 100%;
+                max-width: none;
             }}
         }}
     </style>
 
-    <!-- Header Hero Card -->
-    <div class="agha-hero">
-        <img class="agha-hero-icon" src="{html.escape(post.icon_url)}" alt="{app_name} Icon" />
-        <div class="agha-hero-info">
-            <div class="agha-tags">
-                <span class="agha-badge badge-green">MOD APK</span>
-                <span class="agha-badge badge-blue">v{version}</span>
-                <span class="agha-badge badge-dark">⭐ {rating}/5</span>
+    <!-- App Header Card -->
+    <div class="app-head">
+        <img class="app-icon" src="{html.escape(post.icon_url)}" alt="{app_name} Icon" loading="lazy" />
+        <div class="app-head-info">
+            <div class="app-badges">
+                <span class="pill pill-pink">MOD APK</span>
+                <span class="pill pill-teal">v{version}</span>
+                <span class="pill pill-ochre">⭐ {rating}/5</span>
             </div>
-            <h2 class="agha-hero-title">{app_name}</h2>
-            <div class="agha-hero-meta">By <strong>{developer}</strong> • {installs} Downloads</div>
+            <div class="an">{app_name}</div>
+            <div class="am">By <strong>{developer}</strong> • {installs} Downloads</div>
         </div>
     </div>
 
     <!-- Quick CTA Top -->
-    <div class="agha-cta-box">
-        <div style="font-weight: 700; font-size: 17px; color: #0f172a;">Get {app_name} MOD APK for Android</div>
-        <div style="font-size: 13px; color: #64748b; margin-top: 2px;">{size_meta_line}</div>
-        <div class="agha-btn-group">
-            {primary_btn_html}
-            {mirror_btn_html}
-        </div>
-        <div class="agha-safe-check">
-            <span>⬇ Fast Direct Download • Tested Package</span>
+    <div class="dl-card">
+        <div class="dl-card-title">Get {app_name} MOD APK for Android</div>
+        <div class="dl-card-sub">{size_meta_line}</div>
+        {btn_group_html}
+        <div style="margin-top: 14px;">
+            <span class="pill pill-teal"><span class="pill-dot"></span>Fast Direct Download • Verified Safe</span>
         </div>
     </div>
 
-    <!-- MOD Features Banner -->
-    <div class="agha-mod-card">
-        <div class="agha-mod-title">✨ Mod Features Unlocked</div>
-        <p class="agha-mod-desc">{mod_features}</p>
+    <!-- MOD Features Notice -->
+    <div class="notice">
+        <div class="notice-title">✨ Mod Features Unlocked</div>
+        <p class="notice-desc">{mod_features}</p>
     </div>
 
     <!-- Detailed Specifications -->
-    <div class="agha-section">
-        <h3 class="agha-subtitle">📋 App Specifications</h3>
-        <div class="agha-specs-grid">
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">App Name</div>
-                <div class="agha-spec-val">{app_name}</div>
+    <div class="post-section">
+        <h2>📋 App Specifications</h2>
+        <div class="app-box">
+            <div class="app-row">
+                <span>App Name</span>
+                <b>{app_name}</b>
             </div>
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">Version</div>
-                <div class="agha-spec-val">{version}</div>
+            <div class="app-row">
+                <span>Version</span>
+                <b>{version}</b>
             </div>
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">File Size</div>
-                <div class="agha-spec-val">{size}</div>
+            <div class="app-row">
+                <span>File Size</span>
+                <b>{size}</b>
             </div>
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">Requires Android</div>
-                <div class="agha-spec-val">{android_ver}</div>
+            <div class="app-row">
+                <span>Requires Android</span>
+                <b>{android_ver}</b>
             </div>
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">Developer</div>
-                <div class="agha-spec-val">{developer}</div>
+            <div class="app-row">
+                <span>Developer</span>
+                <b>{developer}</b>
             </div>
-            <div class="agha-spec-card">
-                <div class="agha-spec-label">Last Updated</div>
-                <div class="agha-spec-val">{updated}</div>
+            <div class="app-row">
+                <span>Last Updated</span>
+                <b>{updated}</b>
             </div>
         </div>
     </div>
 
     <!-- App Overview & Features -->
-    <div class="agha-section">
-        <h3 class="agha-subtitle">📖 About {app_name}</h3>
+    <div class="post-section">
+        <h2>📖 About {app_name}</h2>
         {desc_formatted}
     </div>
 
@@ -536,42 +694,41 @@ class AN1Formatter:
     {screenshots_html}
 
     <!-- Installation Guide -->
-    <div class="agha-section">
-        <h3 class="agha-subtitle">📲 How to Install MOD APK</h3>
-        <ol class="agha-steps">
-            <li><strong>Download APK:</strong> Click the download button above or below to save the APK file to your Android device.</li>
-            <li><strong>Allow Unknown Sources:</strong> If prompted, go to <em>Settings &gt; Security (or Apps)</em> and allow installation from Unknown Sources for your browser or file manager.</li>
-            <li><strong>Install:</strong> Tap the downloaded file in your Notification bar or Downloads folder and choose <strong>Install</strong>.</li>
-            <li><strong>Launch & Enjoy:</strong> Open {app_name} and enjoy all modified features with unlimited resources!</li>
+    <div class="post-section">
+        <h2>📲 How to Install MOD APK</h2>
+        <ol class="steps">
+            <li><strong>Download APK:</strong> Tap the download button above or below to save the APK file to your Android device.</li>
+            <li><strong>Allow Unknown Sources:</strong> If prompted, navigate to <em>Settings &gt; Security (or Apps)</em> and permit installation from Unknown Sources for your browser or file manager.</li>
+            <li><strong>Install Package:</strong> Open the downloaded file in your Notification bar or Downloads directory and tap <strong>Install</strong>.</li>
+            <li><strong>Launch & Enjoy:</strong> Open {app_name} and explore all unlocked modified features with unlimited resources!</li>
         </ol>
     </div>
 
     <!-- FAQ Section -->
-    <div class="agha-section">
-        <h3 class="agha-subtitle">❓ Frequently Asked Questions</h3>
-        <div class="agha-faq-item">
-            <div class="agha-faq-q">Is this APK safe to install on my phone?</div>
-            <div class="agha-faq-a">We provide verified package links. As a best practice, always check downloaded APK files with your device built-in security scanner or Play Protect.</div>
-        </div>
-        <div class="agha-faq-item">
-            <div class="agha-faq-q">Do I need root permissions to run this game?</div>
-            <div class="agha-faq-a">No root access is required. The MOD works smoothly on standard non-rooted Android smartphones and tablets.</div>
-        </div>
-        <div class="agha-faq-item">
-            <div class="agha-faq-q">How do I update to the latest version without losing game progress?</div>
-            <div class="agha-faq-a">When an update is released, simply download the new APK and install it directly over the existing installation without deleting the previous game.</div>
+    <div class="post-section">
+        <h2>❓ Frequently Asked Questions</h2>
+        <div class="faq">
+            <details>
+                <summary>Is this APK safe to install on my phone?</summary>
+                <p>Yes. We provide clean, verified package links. As a best practice, you can always scan downloaded APK files with Google Play Protect or your device's built-in security scanner.</p>
+            </details>
+            <details>
+                <summary>Do I need root permissions to run this game?</summary>
+                <p>No root access is required. The MOD works seamlessly on standard, non-rooted Android smartphones and tablets.</p>
+            </details>
+            <details>
+                <summary>How do I update to the latest version without losing progress?</summary>
+                <p>When a new update drops, download the updated APK from this page and install it directly over your existing installation without uninstalling first.</p>
+            </details>
         </div>
     </div>
 
-    <!-- Bottom Download Box -->
-    <div class="agha-cta-box" style="margin-top: 36px; background: #f0fdf4; border-color: #86efac;">
-        <div style="font-weight: 700; font-size: 18px; color: #166534;">Download {app_name} MOD APK</div>
-        <div style="font-size: 13px; color: #15803d; margin-top: 3px;">Direct Download • Version {version}</div>
-        <div class="agha-btn-group">
-            {primary_btn_html}
-            {mirror_btn_html}
-        </div>
-        <p style="font-size: 12px; color: #64748b; margin-top: 14px; margin-bottom: 0;">
+    <!-- Bottom Pre-Footer CTA Card -->
+    <div class="bottom-cta">
+        <h3>Download {app_name} MOD APK</h3>
+        <p>Direct Download • Version {version}</p>
+        {btn_group_html}
+        <p class="disclaimer">
             Disclaimer: All files are provided for informational and testing purposes. All trademarks, logos, and brand names belong to their respective copyright holders.
         </p>
     </div>
