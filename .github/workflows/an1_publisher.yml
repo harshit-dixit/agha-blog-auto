@@ -1,0 +1,102 @@
+name: AN1 Blog Publisher & Sync
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      post_url:
+        description: "Specific AN1 post URL to scrape and publish (e.g. https://an1.com/4683-subway-surfers-mod-apk-8.html)"
+        required: false
+        default: ""
+      limit:
+        description: "Max new posts to publish if no URL is provided"
+        required: false
+        default: "1"
+      publish_mode:
+        description: "Publish as live or draft"
+        required: false
+        default: "live"
+        type: choice
+        options:
+          - live
+          - draft
+
+concurrency:
+  group: an1-publisher
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Restore publication data cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: an1-history-db-${{ github.run_id }}
+          restore-keys: |
+            an1-history-db-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate Blogger secrets
+        run: |
+          missing=()
+          [ -z "${{ secrets.BLOGGER_BLOG_ID }}" ] && missing+=("BLOGGER_BLOG_ID")
+          [ -z "${{ secrets.BLOGGER_CLIENT_ID }}" ] && missing+=("BLOGGER_CLIENT_ID")
+          [ -z "${{ secrets.BLOGGER_CLIENT_SECRET }}" ] && missing+=("BLOGGER_CLIENT_SECRET")
+          [ -z "${{ secrets.BLOGGER_REFRESH_TOKEN }}" ] && missing+=("BLOGGER_REFRESH_TOKEN")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required Blogger secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Run AN1 scraping and publishing pipeline
+        env:
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
+          BLOGGER_CLIENT_ID: ${{ secrets.BLOGGER_CLIENT_ID }}
+          BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
+          BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          MODE_FLAG="--live"
+          if [ "${{ github.event.inputs.publish_mode }}" = "draft" ]; then
+            MODE_FLAG="--draft"
+          fi
+
+          if [ -n "${{ github.event.inputs.post_url }}" ]; then
+            echo "Publishing specific AN1 post: ${{ github.event.inputs.post_url }}"
+            python -m src.main an1-post "${{ github.event.inputs.post_url }}" $MODE_FLAG
+          else
+            LIMIT="${{ github.event.inputs.limit || '1' }}"
+            echo "Syncing new posts from AN1.com (limit: $LIMIT)..."
+            python -m src.main an1-sync --limit "$LIMIT" $MODE_FLAG
+          fi
+
+      - name: Commit and push publication ledger
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p data
+          git add data/an1_published.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Update AN1 published posts ledger [skip ci]"
+            git push
+          else
+            echo "No new publications to commit."
+          fi

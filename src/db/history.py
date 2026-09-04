@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +23,20 @@ CREATE TABLE IF NOT EXISTS published_posts (
     word_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_published_posts_category ON published_posts(category);
+
+CREATE TABLE IF NOT EXISTS an1_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id TEXT NOT NULL UNIQUE,
+    source_url TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    direct_download_url TEXT,
+    dw_page_url TEXT,
+    blogger_post_id TEXT,
+    blogger_url TEXT,
+    published_at TEXT NOT NULL,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_an1_posts_post_id ON an1_posts(post_id);
 """
 
 
@@ -38,14 +53,30 @@ class PublishedPost:
     word_count: int
 
 
+@dataclass
+class AN1PublishedPost:
+    id: int
+    post_id: str
+    source_url: str
+    title: str
+    direct_download_url: Optional[str]
+    dw_page_url: Optional[str]
+    blogger_post_id: Optional[str]
+    blogger_url: Optional[str]
+    published_at: str
+    status: str
+
+
 class HistoryDB:
     """SQLite-backed publication ledger used for duplicate detection and topic rotation."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, json_tracker_path: Optional[Path] = None):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.json_tracker_path = json_tracker_path or (self.db_path.parent / "an1_published.json")
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+        self._sync_from_json_tracker()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -174,3 +205,106 @@ class HistoryDB:
                 "remaining": total - published,
             }
         return stats
+
+    # -------------------------------------------------------------------------
+    # AN1.com Post Tracking & Ledger Methods
+    # -------------------------------------------------------------------------
+
+    def _sync_from_json_tracker(self) -> None:
+        """Seed SQLite an1_posts table from an1_published.json if table is empty or missing entries."""
+        if not self.json_tracker_path.exists():
+            return
+        try:
+            data = json.loads(self.json_tracker_path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                return
+            with self._connect() as conn:
+                for item in data:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO an1_posts
+                            (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item.get("post_id"),
+                            item.get("source_url"),
+                            item.get("title", ""),
+                            item.get("direct_download_url"),
+                            item.get("dw_page_url"),
+                            item.get("blogger_post_id"),
+                            item.get("blogger_url"),
+                            item.get("published_at", datetime.now(timezone.utc).isoformat()),
+                            item.get("status", "LIVE"),
+                        ),
+                    )
+        except Exception:
+            pass
+
+    def _save_to_json_tracker(self) -> None:
+        """Export current AN1 publications to an1_published.json for persistent Git tracking."""
+        posts = self.list_an1_posts()
+        serialized = [
+            {
+                "post_id": p.post_id,
+                "source_url": p.source_url,
+                "title": p.title,
+                "direct_download_url": p.direct_download_url,
+                "dw_page_url": p.dw_page_url,
+                "blogger_post_id": p.blogger_post_id,
+                "blogger_url": p.blogger_url,
+                "published_at": p.published_at,
+                "status": p.status,
+            }
+            for p in posts
+        ]
+        self.json_tracker_path.parent.mkdir(parents=True, exist_ok=True)
+        self.json_tracker_path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+
+    def is_an1_published(self, post_id: str) -> bool:
+        """Check if an AN1 post ID has already been published."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM an1_posts WHERE post_id = ?", (post_id,)).fetchone()
+        return row is not None
+
+    def get_published_an1_ids(self) -> set[str]:
+        """Return set of all published AN1 post IDs."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT post_id FROM an1_posts").fetchall()
+        return {row["post_id"] for row in rows}
+
+    def record_an1_publication(
+        self,
+        *,
+        post_id: str,
+        source_url: str,
+        title: str,
+        direct_download_url: Optional[str] = None,
+        dw_page_url: Optional[str] = None,
+        blogger_post_id: Optional[str] = None,
+        blogger_url: Optional[str] = None,
+        status: str = "LIVE",
+    ) -> int:
+        """Record an AN1 published article and sync to JSON tracker file."""
+        published_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO an1_posts
+                    (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (post_id, source_url, title, direct_download_url, dw_page_url, blogger_post_id, blogger_url, published_at, status),
+            )
+            row_id = cursor.lastrowid or 0
+        self._save_to_json_tracker()
+        return row_id
+
+    def list_an1_posts(self, limit: int = 500) -> list[AN1PublishedPost]:
+        """List published AN1 posts in reverse chronological order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM an1_posts ORDER BY published_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [AN1PublishedPost(**dict(row)) for row in rows]

@@ -10,10 +10,12 @@ from rich.table import Table
 from config.settings import DB_PATH, TOPICS_FILE, get_settings
 from src.catalog import load_catalog
 from src.db.history import HistoryDB
+from src.generators.an1_formatter import AN1Formatter
 from src.generators.gaming_writer import ArticleTooShortError, GamingArticleWriter
 from src.publishers.blogger_client import BloggerClient
 from src.publishers.oauth_helper import export_secrets as build_export_secrets
 from src.publishers.oauth_helper import interactive_login, mask_secret
+from src.scrapers.an1_scraper import AN1Post, AN1Scraper, AN1ScraperError
 
 app = typer.Typer(
     help="Automated SEO publishing pipeline for Android Game Hack Area.",
@@ -100,6 +102,173 @@ def run(
             style="green",
         )
     )
+
+
+@app.command(name="an1-post")
+def an1_post(
+    url: str = typer.Argument(..., help="AN1 post URL to scrape and publish."),
+    draft: Optional[bool] = typer.Option(
+        None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Scrape and format without publishing."
+    ),
+) -> None:
+    """Scrape a specific AN1 post, generate a rich blog page, and publish to Blogger."""
+    settings = get_settings()
+    history = HistoryDB(DB_PATH)
+    scraper = AN1Scraper()
+    formatter = AN1Formatter()
+
+    post_id = scraper.extract_post_id(url)
+    if not dry_run and history.is_an1_published(post_id):
+        console.print(Panel(f"Post {post_id!r} has already been published to Blogger.", title="Already Published", style="yellow"))
+        return
+
+    with console.status(f"Scraping {url}..."):
+        try:
+            post = scraper.scrape_post(url)
+        except AN1ScraperError as exc:
+            console.print(Panel(str(exc), title="Scrape failed", style="red"))
+            raise typer.Exit(code=1)
+
+    title = formatter.build_post_title(post)
+    labels = formatter.build_labels(post)
+    html_content = formatter.format_html(post)
+
+    console.print(
+        f"[green]Scraped & Formatted[/] '[bold]{post.app_name}[/]' (v{post.version}) — "
+        f"Direct Link: {post.direct_download_url or 'n/a'}"
+    )
+
+    is_draft = draft if draft is not None else settings.DEFAULT_PUBLISH_STATUS == "DRAFT"
+
+    if dry_run:
+        output_dir = DB_PATH.parent.parent / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = output_dir / f"an1_{post.post_id}.html"
+        preview_path.write_text(f"<h1>{title}</h1>\n{html_content}", encoding="utf-8")
+        console.print(Panel(f"Dry run only — preview saved to {preview_path}", style="yellow"))
+        return
+
+    with console.status("Publishing to Blogger..."):
+        try:
+            blogger = BloggerClient(settings)
+            result = blogger.publish_article(
+                title=title,
+                content=html_content,
+                labels=labels,
+                is_draft=is_draft,
+            )
+        except RuntimeError as exc:
+            console.print(Panel(str(exc), title="Publish failed", style="red"))
+            raise typer.Exit(code=1)
+
+    history.record_an1_publication(
+        post_id=post.post_id,
+        source_url=post.url,
+        title=title,
+        direct_download_url=post.direct_download_url,
+        dw_page_url=post.dw_page_url,
+        blogger_post_id=result.get("id"),
+        blogger_url=result.get("url"),
+        status="DRAFT" if is_draft else "LIVE",
+    )
+
+    status_label = "DRAFT" if is_draft else "LIVE"
+    console.print(
+        Panel(
+            f"[bold]{title}[/]\nStatus: {status_label}\nBlogger URL: {result.get('url', 'n/a')}\nDirect Link: {post.direct_download_url}",
+            title="AN1 Post Published",
+            style="green",
+        )
+    )
+
+
+@app.command(name="an1-sync")
+def an1_sync(
+    limit: int = typer.Option(1, "--limit", "-l", help="Maximum number of new posts to publish in this run."),
+    draft: Optional[bool] = typer.Option(
+        None, "--draft/--live", help="Publish as draft or live. Defaults to DEFAULT_PUBLISH_STATUS."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Scrape and format without publishing."
+    ),
+) -> None:
+    """Discover newly published posts on AN1.com and publish them to Blogger."""
+    settings = get_settings()
+    history = HistoryDB(DB_PATH)
+    scraper = AN1Scraper()
+    formatter = AN1Formatter()
+
+    with console.status("Checking AN1.com for latest posts..."):
+        discovered_urls = scraper.fetch_latest_post_urls(limit=30)
+
+    published_ids = history.get_published_an1_ids()
+    new_urls: list[str] = []
+    for url in discovered_urls:
+        pid = scraper.extract_post_id(url)
+        if pid not in published_ids:
+            new_urls.append(url)
+
+    if not new_urls:
+        console.print(Panel("No new posts found on AN1.com. All latest posts have already been published.", style="green"))
+        return
+
+    console.print(f"[bold cyan]Found {len(new_urls)} new post(s) on AN1.com.[/] Processing up to {limit}...")
+
+    to_process = new_urls[:limit]
+    published_count = 0
+
+    for url in to_process:
+        with console.status(f"Processing {url}..."):
+            try:
+                post = scraper.scrape_post(url)
+            except AN1ScraperError as exc:
+                console.print(f"[yellow]Skipping {url}:[/] {exc}")
+                continue
+
+            title = formatter.build_post_title(post)
+            labels = formatter.build_labels(post)
+            html_content = formatter.format_html(post)
+
+            is_draft = draft if draft is not None else settings.DEFAULT_PUBLISH_STATUS == "DRAFT"
+
+            if dry_run:
+                output_dir = DB_PATH.parent.parent / "output"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                preview_path = output_dir / f"an1_{post.post_id}.html"
+                preview_path.write_text(f"<h1>{title}</h1>\n{html_content}", encoding="utf-8")
+                console.print(f"[yellow]Dry-run saved:[/] {preview_path}")
+                published_count += 1
+                continue
+
+            try:
+                blogger = BloggerClient(settings)
+                result = blogger.publish_article(
+                    title=title,
+                    content=html_content,
+                    labels=labels,
+                    is_draft=is_draft,
+                )
+            except RuntimeError as exc:
+                console.print(f"[red]Failed to publish {title}:[/] {exc}")
+                continue
+
+            history.record_an1_publication(
+                post_id=post.post_id,
+                source_url=post.url,
+                title=title,
+                direct_download_url=post.direct_download_url,
+                dw_page_url=post.dw_page_url,
+                blogger_post_id=result.get("id"),
+                blogger_url=result.get("url"),
+                status="DRAFT" if is_draft else "LIVE",
+            )
+            published_count += 1
+            console.print(f"[green]Published:[/] {title} -> {result.get('url', 'n/a')}")
+
+    console.print(Panel(f"Successfully processed {published_count} AN1 post(s).", style="green"))
 
 
 @app.command()
