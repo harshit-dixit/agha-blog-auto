@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -644,6 +645,26 @@ def test_enhance_batch_raises_when_nothing_usable_comes_back():
         formatter.enhance_batch(_batch_posts(2))
 
 
+def test_rejected_batch_logs_the_shape_of_the_reply(caplog):
+    """A rejected batch must name its own cause.
+
+    Wrong field names, ids matching nothing and prose that is not <p> markup all surface
+    identically as "no usable reviews", so the reply's actual shape has to reach the log or
+    the next failure is undiagnosable after the fact.
+    """
+    reply = json.dumps([{"id": "2000", "review": _review("Right prose, wrong keys")}])
+    formatter = _formatter_with_fake_gemini(response_text=reply)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ContentEnhancementError):
+        formatter.enhance_batch(_batch_posts(1))
+
+    assert "Rejected batch reply" in caplog.text
+    assert "1 object(s) parsed" in caplog.text
+    # The keys it actually used - the fact that separates a renamed field from bad prose.
+    assert "keys=['id', 'review']" in caplog.text
+    assert "Right prose, wrong keys review prose." in caplog.text
+
+
 def test_format_html_prefers_supplied_prose_over_a_fresh_call(sample_post: AN1Post):
     formatter = _formatter_with_fake_gemini(response_text=_review("Should not be used"))
 
@@ -719,8 +740,8 @@ def test_sync_batches_generation_into_one_call_per_batch_size(tmp_path: Path):
         result = runner.invoke(app, ["an1-sync", "--dry-run", "--limit", "6"])
 
     assert result.exit_code == 0
-    # Six posts at the default batch size of 5 means two calls, not six.
-    assert batch_sizes == [5, 1]
+    # Six posts at the default batch size of 2 means three calls, not six.
+    assert batch_sizes == [2, 2, 2]
     assert "Successfully processed 6 AN1 post(s)" in result.stdout
 
 
@@ -797,7 +818,8 @@ def test_sync_publishes_the_batch_that_succeeded_before_the_quota_ran_out(tmp_pa
         result = runner.invoke(app, ["an1-sync", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "Successfully processed 5 AN1 post(s)" in result.stdout
+    # Only the first batch got through before the quota error stopped generation.
+    assert "Successfully processed 2 AN1 post(s)" in result.stdout
 
 
 def test_json_ledger_keeps_every_row_past_the_list_default_limit(tmp_path: Path):
@@ -992,7 +1014,10 @@ def test_prose_survives_a_failed_publish_and_is_not_regenerated(tmp_path: Path):
     rate_limited.publish_article.side_effect = BloggerRateLimitError("429 rateLimitExceeded")
     first = run_sync(rate_limited)
     assert first.exit_code == 0, first.stdout
-    assert len(batch_calls) == 1, "expected exactly one generation call in run 1"
+    # Pinning the exact count would only re-encode GEMINI_BATCH_SIZE; what matters is that
+    # run 2 adds nothing to it.
+    calls_after_run_1 = len(batch_calls)
+    assert calls_after_run_1 > 0, "run 1 should have generated prose"
 
     # Run 2: Blogger recovers. The prose is already cached, so Gemini is never called.
     working = MagicMock()
@@ -1000,7 +1025,7 @@ def test_prose_survives_a_failed_publish_and_is_not_regenerated(tmp_path: Path):
     second = run_sync(working)
 
     assert second.exit_code == 0, second.stdout
-    assert len(batch_calls) == 1, f"regenerated prose that was already cached: {batch_calls}"
+    assert len(batch_calls) == calls_after_run_1, f"regenerated prose that was already cached: {batch_calls}"
     assert "Reused cached reviews for 3 post(s)" in second.stdout
     assert "Successfully processed 3 AN1 post(s)" in second.stdout
 

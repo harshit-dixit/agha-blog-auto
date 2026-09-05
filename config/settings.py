@@ -26,11 +26,11 @@ class Settings(BaseSettings):
     # Lite tier's is 200/day against Flash's 20/day. Ten times the daily budget is worth
     # more here than the larger model's prose, since a spent quota defers whole runs.
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
-    # Posts per batched review request. Batching trades quota for quality: one reply has
-    # to hold every review inside the output-token ceiling, and a truncated response costs
-    # the whole batch. With 200 requests/day the quota side is no longer tight, so keep
-    # this small.
-    GEMINI_BATCH_SIZE: int = 5
+    # Posts per batched review request. Batching trades quota for blast radius: one reply
+    # has to hold every review inside the output-token ceiling, and a reply that comes back
+    # unusable defers every post in it. With 200 requests/day the quota side is no longer
+    # tight - a full run costs single-digit requests at this size - so it stays low.
+    GEMINI_BATCH_SIZE: int = 2
 
     BLOGGER_BLOG_ID: str | None = None
     # Blogger rejects rapid bursts of inserts with HTTP 429 well before any daily cap is

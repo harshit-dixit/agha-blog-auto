@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 
 from config.settings import Settings
 from src.scrapers.an1_scraper import AN1Post
@@ -20,6 +21,25 @@ MIN_ENHANCED_LENGTH = 200
 # Ceiling for a batched reply. Four-paragraph reviews run 550-800 tokens each once the
 # HTML is JSON-escaped, so this is the headroom that keeps a small batch from truncating.
 BATCH_MAX_OUTPUT_TOKENS = 8192
+
+# How much of an unusable reply is logged. A rejected batch is otherwise invisible - the
+# text is discarded and only its length is reported - which makes "no usable reviews"
+# impossible to diagnose after the fact. Enough characters to see the shape of the first
+# entry, not so many that a failing run floods the CI log.
+RAW_REPLY_LOG_CHARS = 800
+
+
+# One entry of a batched reply. Handed to the API as a response schema so the field names
+# are enforced during decoding rather than merely requested in the prompt: without it a
+# model is free to answer with {"id": ..., "review": ...}, which parses as valid JSON and
+# then fails the post_id match silently, rejecting the whole batch even though usable prose
+# came back. The docstring and field descriptions below are serialized into the schema and
+# sent to the model, so they are written for it rather than for the reader.
+class BatchReviewItem(BaseModel):
+    """One game's finished review, labelled with the post_id that game was given."""
+
+    post_id: str = Field(description="The exact post_id given for that game in the prompt")
+    review_html: str = Field(description="The review as <p>...</p> paragraphs only, no markdown or other tags")
 
 
 class ContentEnhancementError(RuntimeError):
@@ -183,6 +203,9 @@ class AN1Formatter:
 
         text = self._normalize_enhanced_text(raw_text)
         if not text:
+            logger.warning(
+                "Rejected reply for %r: %s", post.app_name, self._describe_reply(raw_text, [], set())
+            )
             raise ContentEnhancementError(
                 f"Gemini returned unusable prose for {post.app_name!r} "
                 f"({len(raw_text.strip())} chars, no usable <p> block)"
@@ -243,6 +266,7 @@ class AN1Formatter:
                 config=types.GenerateContentConfig(
                     temperature=0.7,
                     response_mime_type="application/json",
+                    response_schema=list[BatchReviewItem],
                     max_output_tokens=BATCH_MAX_OUTPUT_TOKENS,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
@@ -253,8 +277,9 @@ class AN1Formatter:
             raise self._generation_error(subject, exc) from exc
 
         wanted = {post.post_id: post for post in posts}
+        items = self._parse_batch_items(raw_text)
         results: dict[str, str] = {}
-        for item in self._parse_batch_items(raw_text):
+        for item in items:
             post_id = str(item.get("post_id", "")).strip()
             if post_id not in wanted or post_id in results:
                 continue
@@ -270,12 +295,41 @@ class AN1Formatter:
                 len(posts),
                 ", ".join(missing),
             )
+            # The reply itself, not just its length: which of the three ways a batch can be
+            # rejected (unparseable, wrong field names, ids that match nothing, prose that
+            # is not <p> markup) is only distinguishable from the raw text.
+            logger.warning("Rejected batch reply: %s", self._describe_reply(raw_text, items, set(wanted)))
         if not results:
             raise ContentEnhancementError(
                 f"Gemini batch returned no usable reviews for any of the {len(posts)} "
                 f"post(s) ({len(raw_text.strip())} chars returned)"
             )
         return results
+
+    @staticmethod
+    def _describe_reply(raw_text: str, items: list[dict], wanted_ids: set[str]) -> str:
+        """Summarize an unusable reply into one log line.
+
+        Reports the shape the model actually answered with - how many objects parsed, the
+        field names they used, and the ids they claimed - followed by an excerpt, so the
+        next failure names its own cause instead of leaving a character count behind.
+        """
+        text = raw_text.strip()
+        keys = sorted({str(key) for item in items for key in item})
+        returned_ids = [str(item.get("post_id", "")).strip() or "<none>" for item in items]
+        unmatched = [pid for pid in returned_ids if pid not in wanted_ids]
+
+        excerpt = " ".join(text[:RAW_REPLY_LOG_CHARS].split())
+        if len(text) > RAW_REPLY_LOG_CHARS:
+            excerpt += " [...]"
+
+        return (
+            f"{len(text)} chars, {len(items)} object(s) parsed; "
+            f"keys={keys or '<none>'}; "
+            f"post_ids returned={returned_ids or '<none>'} (wanted {sorted(wanted_ids)}"
+            f"{f', {len(unmatched)} unmatched' if unmatched else ''}); "
+            f"first {min(len(text), RAW_REPLY_LOG_CHARS)} chars: {excerpt}"
+        )
 
     @staticmethod
     def _parse_batch_items(raw_text: str) -> list[dict]:
