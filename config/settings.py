@@ -37,7 +37,13 @@ class Settings(BaseSettings):
     # reached, so writes are both retried with backoff and spaced out. The retry count is
     # handed to googleapiclient, whose num_retries already backs off on 429/5xx.
     BLOGGER_MAX_RETRIES: int = 5
-    BLOGGER_MIN_WRITE_INTERVAL: float = 3.0
+    # Blogger's write velocity block is far tighter than its documented 100-requests/100s
+    # user quota: five inserts 3s apart tripped it, and the block outlived a full 30-60s of
+    # googleapiclient backoff, so the retries cannot rescue a run that paces too fast. At
+    # this interval a 10-post run spends ~4.5 minutes publishing, against a 30-minute job
+    # timeout. Raise it further if 429s come back; the wall-clock budget is not the
+    # constraint here.
+    BLOGGER_MIN_WRITE_INTERVAL: float = 30.0
     BLOGGER_CLIENT_ID: str | None = None
     BLOGGER_CLIENT_SECRET: str | None = None
     BLOGGER_REFRESH_TOKEN: str | None = None
