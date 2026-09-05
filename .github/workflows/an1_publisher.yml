@@ -45,13 +45,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Load publication ledger from ledger branch
+      - name: Load publication ledger and prose cache from ledger branch
         run: |
           mkdir -p data
           if git ls-remote --exit-code --heads origin ledger > /dev/null 2>&1; then
             echo "Fetching ledger from origin/ledger..."
             git fetch origin ledger:refs/remotes/origin/ledger
             git checkout origin/ledger -- data/an1_published.json 2>/dev/null || echo "data/an1_published.json not found on ledger branch yet; using repository state."
+            # The prose cache holds reviews generated for posts that have not published
+            # yet. history.db is gitignored and rebuilt each run, so without restoring this
+            # file every deferred post is regenerated against the Gemini daily quota.
+            git checkout origin/ledger -- data/an1_prose_cache.json 2>/dev/null || echo "data/an1_prose_cache.json not found on ledger branch yet; starting with an empty cache."
           else
             echo "Ledger branch not found on origin; using repository state."
           fi
@@ -105,24 +109,36 @@ jobs:
 
       - name: Commit and push publication ledger to ledger branch
         # always(): if the pipeline publishes some posts and then fails, the ledger still
-        # has to be persisted or those posts get republished on the next run.
+        # has to be persisted or those posts get republished on the next run. The same
+        # applies to the prose cache - losing it means paying Gemini twice for the posts
+        # that were generated but not published.
         if: always()
         run: |
-          if [ -f data/an1_published.json ]; then
+          if [ -f data/an1_published.json ] || [ -f data/an1_prose_cache.json ]; then
             git config --global user.name "github-actions[bot]"
             git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-            # Stash updated ledger temporarily
-            cp data/an1_published.json /tmp/an1_published.json
+            # Stash updated state temporarily
+            [ -f data/an1_published.json ] && cp data/an1_published.json /tmp/an1_published.json
+            [ -f data/an1_prose_cache.json ] && cp data/an1_prose_cache.json /tmp/an1_prose_cache.json
 
-            # Switch to ledger branch
-            git fetch origin ledger
+            # Switch to ledger branch. The fetch is allowed to fail: on the very first
+            # run the branch does not exist yet, and the checkout below falls back to
+            # creating it. Without the guard, bash -e aborts the step and the first run's
+            # ledger is never persisted.
+            git fetch origin ledger || true
             git checkout -B ledger origin/ledger || git checkout -B ledger
 
-            # Restore updated ledger file on ledger branch
+            # Restore updated files on ledger branch
             mkdir -p data
-            cp /tmp/an1_published.json data/an1_published.json
-            git add data/an1_published.json
+            if [ -f /tmp/an1_published.json ]; then
+              cp /tmp/an1_published.json data/an1_published.json
+              git add data/an1_published.json
+            fi
+            if [ -f /tmp/an1_prose_cache.json ]; then
+              cp /tmp/an1_prose_cache.json data/an1_prose_cache.json
+              git add data/an1_prose_cache.json
+            fi
 
             if ! git diff --staged --quiet; then
               git commit -m "Update AN1 published posts ledger [skip ci]"

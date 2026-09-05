@@ -22,18 +22,32 @@ class Settings(BaseSettings):
     )
 
     GEMINI_API_KEY: str | None = None
-    GEMINI_MODEL: str = "gemini-3.5-flash"
-    # Posts per batched review request. The free tier bills a per-day request count, so
-    # batching is what keeps a run affordable; keep this small enough that one reply fits
-    # inside the output-token ceiling and a truncated response costs only a few posts.
+    # Flash-Lite rather than Flash: the free tier bills a per-day request count, and the
+    # Lite tier's is 200/day against Flash's 20/day. Ten times the daily budget is worth
+    # more here than the larger model's prose, since a spent quota defers whole runs.
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+    # Posts per batched review request. Batching trades quota for quality: one reply has
+    # to hold every review inside the output-token ceiling, and a truncated response costs
+    # the whole batch. With 200 requests/day the quota side is no longer tight, so keep
+    # this small.
     GEMINI_BATCH_SIZE: int = 5
 
     BLOGGER_BLOG_ID: str | None = None
+    # Blogger rejects rapid bursts of inserts with HTTP 429 well before any daily cap is
+    # reached, so writes are both retried with backoff and spaced out. The retry count is
+    # handed to googleapiclient, whose num_retries already backs off on 429/5xx.
+    BLOGGER_MAX_RETRIES: int = 5
+    BLOGGER_MIN_WRITE_INTERVAL: float = 3.0
     BLOGGER_CLIENT_ID: str | None = None
     BLOGGER_CLIENT_SECRET: str | None = None
     BLOGGER_REFRESH_TOKEN: str | None = None
     BLOGGER_CLIENT_SECRET_FILE: str = "client_secret.json"
     BLOGGER_TOKEN_FILE: str = "token.json"
+
+    # Days a cached review is reused before it is dropped as stale. Prose is cached when a
+    # post is generated but not published (a Blogger 429, say), so it only has to survive
+    # long enough for the next few scheduled runs to retry the post.
+    PROSE_CACHE_TTL_DAYS: int = 14
 
     DEFAULT_PUBLISH_STATUS: Literal["DRAFT", "LIVE"] = "DRAFT"
     MIN_WORD_COUNT: int = 1200

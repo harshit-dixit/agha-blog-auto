@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -14,6 +15,7 @@ from src.generators.an1_formatter import (
     QuotaExhaustedError,
 )
 from src.main import app
+from src.publishers.blogger_client import BloggerRateLimitError
 from src.scrapers.an1_scraper import (
     AN1Post,
     AN1Scraper,
@@ -27,7 +29,7 @@ def _formatter_with_fake_gemini(*, response_text: str = "", exc: Exception | Non
     """Build a formatter wired to a stubbed Gemini client (never touches the network)."""
     formatter = AN1Formatter()
     fake_settings = MagicMock()
-    fake_settings.GEMINI_MODEL = "gemini-3.5-flash"
+    fake_settings.GEMINI_MODEL = "gemini-3.5-flash-lite"
     formatter.settings = fake_settings
 
     client = MagicMock()
@@ -848,3 +850,199 @@ def test_json_ledger_keeps_every_row_past_the_list_default_limit(tmp_path: Path)
     rebuilt = HistoryDB(tmp_path / "rebuilt.db", json_tracker_path=json_path)
     assert rebuilt.is_an1_published("0", "1.0")
     assert ("0", "1.0") in rebuilt.get_published_an1_keys()
+
+
+# ---------------------------------------------------------------------------
+# Blogger rate-limit handling and the generated-prose cache
+# ---------------------------------------------------------------------------
+
+
+def _http_error(status: int, reason: str = "rateLimitExceeded"):
+    """Build an HttpError shaped like the ones Blogger returns."""
+    from googleapiclient.errors import HttpError
+
+    payload = {
+        "error": {
+            "code": status,
+            "message": "Resource has been exhausted.",
+            "errors": [{"message": "Resource has been exhausted.", "reason": reason}],
+        }
+    }
+    return HttpError(MagicMock(status=status, reason=reason), json.dumps(payload).encode())
+
+
+def _blogger_client(service: MagicMock, **overrides):
+    """Build a BloggerClient with auth and API discovery stubbed out."""
+    from config.settings import Settings
+    from src.publishers.blogger_client import BloggerClient
+
+    settings = Settings(BLOGGER_BLOG_ID="blog-1", **overrides)
+    with patch("src.publishers.blogger_client.get_credentials", return_value=MagicMock()), \
+         patch("src.publishers.blogger_client.build", return_value=service):
+        return BloggerClient(settings)
+
+
+def test_blogger_write_asks_googleapiclient_to_retry():
+    """A burst 429 must be retried with backoff rather than losing the post outright."""
+    service = MagicMock()
+    insert = service.posts.return_value.insert.return_value
+    insert.execute.return_value = {"id": "1", "url": "https://blog/1"}
+
+    client = _blogger_client(service, BLOGGER_MAX_RETRIES=5, BLOGGER_MIN_WRITE_INTERVAL=0)
+    client.publish_article(title="T", content="<p>c</p>", labels=[], is_draft=False)
+
+    # num_retries is what makes googleapiclient back off on 429/5xx.
+    assert insert.execute.call_args.kwargs["num_retries"] == 5
+
+
+def test_blogger_429_raises_rate_limit_error_not_a_plain_failure():
+    service = MagicMock()
+    service.posts.return_value.insert.return_value.execute.side_effect = _http_error(429)
+
+    client = _blogger_client(service, BLOGGER_MIN_WRITE_INTERVAL=0)
+    with pytest.raises(BloggerRateLimitError):
+        client.publish_article(title="T", content="<p>c</p>", labels=[], is_draft=False)
+
+
+def test_blogger_403_permission_error_is_not_treated_as_a_rate_limit():
+    """A genuine permission failure must stay a hard error instead of pausing the run."""
+    service = MagicMock()
+    service.posts.return_value.insert.return_value.execute.side_effect = _http_error(
+        403, reason="forbidden"
+    )
+
+    client = _blogger_client(service, BLOGGER_MIN_WRITE_INTERVAL=0)
+    with pytest.raises(RuntimeError) as exc_info:
+        client.publish_article(title="T", content="<p>c</p>", labels=[], is_draft=False)
+    assert not isinstance(exc_info.value, BloggerRateLimitError)
+
+
+def test_blogger_paces_consecutive_writes():
+    """Back-to-back inserts are what trip the burst limit, so writes must be spaced out."""
+    service = MagicMock()
+    service.posts.return_value.insert.return_value.execute.return_value = {"id": "1"}
+    slept: list[float] = []
+
+    client = _blogger_client(service, BLOGGER_MIN_WRITE_INTERVAL=3.0)
+    with patch("src.publishers.blogger_client.time.sleep", side_effect=slept.append):
+        client.publish_article(title="A", content="<p>a</p>", labels=[], is_draft=False)
+        client.publish_article(title="B", content="<p>b</p>", labels=[], is_draft=False)
+
+    # The first write goes out immediately; the second waits out the interval.
+    assert len(slept) == 1
+    assert 0 < slept[0] <= 3.0
+
+
+def test_sync_stops_publishing_after_a_blogger_rate_limit(tmp_path: Path):
+    """One 429 must end the run, not be re-tried once per remaining post."""
+    discovered = [f"https://an1.com/{8000 + i}-game-{i}.html" for i in range(10)]
+    attempts = {"n": 0}
+
+    def publish(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            return {"id": str(attempts["n"]), "url": "https://blog/x"}
+        raise BloggerRateLimitError("Blogger publish failed: 429 rateLimitExceeded")
+
+    blogger = MagicMock()
+    blogger.publish_article.side_effect = publish
+
+    runner = CliRunner()
+    with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+         patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+         patch("src.main.AN1Scraper.validate_post"), \
+         patch("src.main.AN1Scraper.resolve_download_link"), \
+         patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=False), \
+         patch("src.main.AN1Formatter.format_html", return_value="<p>Review content</p>"), \
+         patch("src.main.BloggerClient", return_value=blogger), \
+         patch("src.main.DB_PATH", tmp_path / "history.db"):
+        result = runner.invoke(app, ["an1-sync", "--limit", "10"])
+
+    # Two published, the third hit the limit and ended the run: 10 eligible, 3 attempts.
+    assert result.exit_code == 0, result.stdout
+    assert attempts["n"] == 3, f"kept publishing after the rate limit ({attempts['n']} attempts)"
+    assert "rate limit" in result.stdout.lower()
+    assert "Successfully processed 2 AN1 post(s)" in result.stdout
+
+
+def test_prose_survives_a_failed_publish_and_is_not_regenerated(tmp_path: Path):
+    """The core waste: a Blogger failure must not cost a second Gemini request next run."""
+    db_path = tmp_path / "history.db"
+    discovered = [f"https://an1.com/{9000 + i}-game-{i}.html" for i in range(3)]
+    batch_calls: list[list[str]] = []
+
+    def fake_batch(self, posts):
+        batch_calls.append([p.post_id for p in posts])
+        return {p.post_id: _review(p.app_name) for p in posts}
+
+    def run_sync(blogger):
+        runner = CliRunner()
+        with patch("src.main.AN1Scraper.fetch_latest_post_urls", return_value=discovered), \
+             patch("src.main.AN1Scraper.scrape_post", side_effect=_sync_scrape_stub), \
+             patch("src.main.AN1Scraper.validate_post"), \
+             patch("src.main.AN1Scraper.resolve_download_link"), \
+             patch("src.main.AN1Formatter.gemini_enabled", new_callable=PropertyMock, return_value=True), \
+             patch("src.main.AN1Formatter.enhance_batch", autospec=True, side_effect=fake_batch), \
+             patch("src.main.BloggerClient", return_value=blogger), \
+             patch("src.main.DB_PATH", db_path):
+            return runner.invoke(app, ["an1-sync", "--limit", "3"])
+
+    # Run 1: Gemini generates all three, Blogger rate-limits the first insert.
+    rate_limited = MagicMock()
+    rate_limited.publish_article.side_effect = BloggerRateLimitError("429 rateLimitExceeded")
+    first = run_sync(rate_limited)
+    assert first.exit_code == 0, first.stdout
+    assert len(batch_calls) == 1, "expected exactly one generation call in run 1"
+
+    # Run 2: Blogger recovers. The prose is already cached, so Gemini is never called.
+    working = MagicMock()
+    working.publish_article.side_effect = lambda **kw: {"id": "x", "url": "https://blog/x"}
+    second = run_sync(working)
+
+    assert second.exit_code == 0, second.stdout
+    assert len(batch_calls) == 1, f"regenerated prose that was already cached: {batch_calls}"
+    assert "Reused cached reviews for 3 post(s)" in second.stdout
+    assert "Successfully processed 3 AN1 post(s)" in second.stdout
+
+    # Published posts release their cache entries, so the cache tracks only the backlog.
+    assert json.loads((tmp_path / "an1_prose_cache.json").read_text(encoding="utf-8")) == []
+
+
+def test_prose_cache_survives_a_rebuilt_database(tmp_path: Path):
+    """history.db is gitignored and rebuilt each CI run, so the cache must live in JSON."""
+    db = HistoryDB(tmp_path / "history.db")
+    db.cache_prose_many([("123", "2.0", "<p>cached prose</p>")])
+
+    # A fresh DB in the same directory, as CI gets after checking out the ledger branch.
+    (tmp_path / "history.db").unlink()
+    rebuilt = HistoryDB(tmp_path / "history.db")
+
+    assert rebuilt.get_cached_prose("123", "2.0") == "<p>cached prose</p>"
+    # Version-keyed: an AN1 version bump must regenerate rather than reuse stale prose.
+    assert rebuilt.get_cached_prose("123", "2.1") is None
+
+
+def test_stale_prose_cache_entries_are_dropped(tmp_path: Path):
+    (tmp_path / "an1_prose_cache.json").write_text(
+        json.dumps(
+            [
+                {"post_id": "old", "version": "1.0", "prose_html": "<p>stale</p>",
+                 "created_at": "2020-01-01T00:00:00+00:00"},
+                {"post_id": "new", "version": "1.0", "prose_html": "<p>fresh</p>",
+                 "created_at": datetime.now(UTC).isoformat()},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    db = HistoryDB(tmp_path / "history.db", prose_cache_ttl_days=14)
+
+    assert db.get_cached_prose("old", "1.0") is None
+    assert db.get_cached_prose("new", "1.0") == "<p>fresh</p>"
+
+
+def test_corrupt_prose_cache_is_recoverable_not_fatal(tmp_path: Path):
+    """A corrupt ledger fails the run; a corrupt cache only costs a regeneration."""
+    (tmp_path / "an1_prose_cache.json").write_text("{not json", encoding="utf-8")
+
+    db = HistoryDB(tmp_path / "history.db")
+    assert db.get_cached_prose("123", "1.0") is None

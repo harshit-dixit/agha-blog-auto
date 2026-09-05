@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 
 from googleapiclient.discovery import build
@@ -8,6 +9,36 @@ from googleapiclient.errors import HttpError
 from config.settings import Settings
 from src.db.history import HistoryDB
 from src.publishers.oauth_helper import get_credentials
+
+RATE_LIMIT_REASONS = {"ratelimitexceeded", "userratelimitexceeded", "quotaexceeded"}
+
+
+class BloggerRateLimitError(RuntimeError):
+    """Raised when Blogger rejects a write because the rate limit or quota is spent.
+
+    Like Gemini's QuotaExhaustedError this is a run-level condition: once retries with
+    backoff have been exhausted, every later write in the same run fails the same way, so
+    callers should stop publishing rather than burn the rest of the backlog on doomed
+    inserts. Subclasses RuntimeError so existing per-post handlers still treat it as a
+    skip.
+    """
+
+
+def _is_rate_limit_error(exc: HttpError) -> bool:
+    """Detect HTTP 429 / rate-limit rejections in a Blogger API error."""
+    if getattr(exc.resp, "status", None) in (429, 403):
+        # 403 is only a rate limit when the reason says so - it is otherwise a genuine
+        # permission failure, which must keep surfacing as a hard error.
+        if exc.resp.status == 403:
+            details = getattr(exc, "error_details", None) or []
+            reasons = {
+                str(d.get("reason", "")).lower()
+                for d in details
+                if isinstance(d, dict)
+            }
+            return bool(reasons & RATE_LIMIT_REASONS)
+        return True
+    return False
 
 
 class BloggerClient:
@@ -18,6 +49,24 @@ class BloggerClient:
         self.blog_id = settings.require_blog_id()
         credentials = get_credentials(settings)
         self._service = build("blogger", "v3", credentials=credentials, cache_discovery=False)
+        self._num_retries = max(0, settings.BLOGGER_MAX_RETRIES)
+        self._min_write_interval = max(0.0, settings.BLOGGER_MIN_WRITE_INTERVAL)
+        self._last_write_at: float | None = None
+
+    def _throttle_writes(self) -> None:
+        """Space consecutive writes out so a batch of publishes does not trip a burst limit.
+
+        Blogger accepts a handful of back-to-back inserts and then 429s the rest, so the
+        retry backoff alone is not enough - the requests have to arrive slower in the
+        first place.
+        """
+        if self._min_write_interval <= 0:
+            return
+        if self._last_write_at is not None:
+            elapsed = time.monotonic() - self._last_write_at
+            if elapsed < self._min_write_interval:
+                time.sleep(self._min_write_interval - elapsed)
+        self._last_write_at = time.monotonic()
 
     def get_blog_info(self) -> dict:
         return self._service.blogs().get(blogId=self.blog_id).execute()
@@ -31,14 +80,18 @@ class BloggerClient:
         is_draft: bool = True,
     ) -> dict:
         body = {"kind": "blogger#post", "title": title, "content": content, "labels": labels}
+        self._throttle_writes()
         try:
             return (
                 self._service.posts()
                 .insert(blogId=self.blog_id, body=body, isDraft=is_draft)
-                .execute()
+                .execute(num_retries=self._num_retries)
             )
         except HttpError as exc:
-            raise RuntimeError(f"Blogger publish failed: {exc}") from exc
+            message = f"Blogger publish failed: {exc}"
+            if _is_rate_limit_error(exc):
+                raise BloggerRateLimitError(message) from exc
+            raise RuntimeError(message) from exc
 
     def update_article(
         self,
@@ -50,14 +103,18 @@ class BloggerClient:
     ) -> dict:
         """Update an existing post in Blogger (e.g. for version bumps)."""
         body = {"kind": "blogger#post", "id": post_id, "title": title, "content": content, "labels": labels}
+        self._throttle_writes()
         try:
             return (
                 self._service.posts()
                 .patch(blogId=self.blog_id, postId=post_id, body=body)
-                .execute()
+                .execute(num_retries=self._num_retries)
             )
         except HttpError as exc:
-            raise RuntimeError(f"Blogger update failed for post {post_id}: {exc}") from exc
+            message = f"Blogger update failed for post {post_id}: {exc}"
+            if _is_rate_limit_error(exc):
+                raise BloggerRateLimitError(message) from exc
+            raise RuntimeError(message) from exc
 
     def list_recent_posts(self, max_results: int = 10) -> list[dict]:
         response = (

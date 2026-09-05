@@ -5,7 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from config.settings import DB_PATH, TOPICS_FILE, get_settings
+from config.settings import DB_PATH, TOPICS_FILE, Settings, get_settings
 from src.catalog import load_catalog
 from src.db.history import HistoryDB
 from src.generators.an1_formatter import (
@@ -14,7 +14,7 @@ from src.generators.an1_formatter import (
     QuotaExhaustedError,
 )
 from src.generators.gaming_writer import ArticleTooShortError, GamingArticleWriter
-from src.publishers.blogger_client import BloggerClient
+from src.publishers.blogger_client import BloggerClient, BloggerRateLimitError
 from src.publishers.oauth_helper import export_secrets as build_export_secrets
 from src.publishers.oauth_helper import interactive_login, mask_secret
 from src.scrapers.an1_scraper import AN1Post, AN1Scraper, AN1ScraperError
@@ -24,6 +24,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _open_history(settings: Settings) -> HistoryDB:
+    """Open the ledger with the generated-prose cache wired up."""
+    # The cache path is derived from DB_PATH inside HistoryDB, exactly as the JSON ledger
+    # is, so DB_PATH stays the single source of truth for where run state lives.
+    return HistoryDB(DB_PATH, prose_cache_ttl_days=settings.PROSE_CACHE_TTL_DAYS)
 
 
 @app.command()
@@ -118,7 +125,7 @@ def an1_post(
 ) -> None:
     """Scrape a specific AN1 post, generate a rich blog page, and publish to Blogger."""
     settings = get_settings()
-    history = HistoryDB(DB_PATH)
+    history = _open_history(settings)
     scraper = AN1Scraper()
     formatter = AN1Formatter(settings=settings)
 
@@ -238,7 +245,7 @@ def an1_sync(
 ) -> None:
     """Discover newly published posts on AN1.com and publish them to Blogger."""
     settings = get_settings()
-    history = HistoryDB(DB_PATH)
+    history = _open_history(settings)
     scraper = AN1Scraper()
     formatter = AN1Formatter(settings=settings)
 
@@ -316,15 +323,32 @@ def an1_sync(
     prose_by_id: dict[str, str] = {}
     generation_failures = 0
     quota_exhausted = False
+    cache_hits = 0
 
     if formatter.gemini_enabled:
+        # Reuse prose generated on an earlier run whose post never made it out - a Blogger
+        # rate limit, say. Without this, every failed publish costs a second Gemini request
+        # against the free tier's daily budget, so publish failures quietly eat the
+        # generation budget that would have cleared the backlog.
+        pending: list[AN1Post] = []
+        for post in eligible:
+            cached = history.get_cached_prose(post.post_id, post.version)
+            if cached:
+                prose_by_id[post.post_id] = cached
+                cache_hits += 1
+            else:
+                pending.append(post)
+
+        if cache_hits:
+            console.print(f"[dim]Reused cached reviews for {cache_hits} post(s).[/dim]")
+
         batch_size = max(1, settings.GEMINI_BATCH_SIZE)
-        batches = [eligible[i:i + batch_size] for i in range(0, len(eligible), batch_size)]
+        batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
         for index, batch in enumerate(batches, start=1):
             names = ", ".join(p.app_name for p in batch)
             try:
                 with console.status(f"Generating reviews (batch {index}/{len(batches)})..."):
-                    prose_by_id.update(formatter.enhance_batch(batch))
+                    generated = formatter.enhance_batch(batch)
             except QuotaExhaustedError as exc:
                 # Every later call this run fails identically, so stop instead of walking
                 # the rest of the backlog burning requests against a spent quota.
@@ -334,11 +358,22 @@ def an1_sync(
             except ContentEnhancementError as exc:
                 generation_failures += len(batch)
                 console.print(f"[yellow]Batch {index}/{len(batches)} failed ({names}):[/] {exc}")
+                continue
+
+            prose_by_id.update(generated)
+            # Persist before publishing: prose is cached the moment it exists, so a crash
+            # or rate limit later in this run cannot lose it.
+            versions = {post.post_id: post.version for post in batch}
+            history.cache_prose_many(
+                [(pid, versions.get(pid, ""), html) for pid, html in generated.items()]
+            )
 
     # Phase 3: publish everything that has original prose. Posts without it stay in the
     # backlog for the next run rather than going out with AN1's scraped text verbatim.
     published_count = 0
     deferred_count = 0
+    publish_failures = 0
+    rate_limited = False
 
     for post in eligible:
         if published_count >= limit:
@@ -393,7 +428,15 @@ def an1_sync(
                         is_draft=is_draft,
                     )
                     action = "Published"
+            except BloggerRateLimitError as exc:
+                # Retries with backoff are already spent by this point, so every remaining
+                # insert this run fails the same way. Stop rather than burning the backlog
+                # on doomed requests; the cached prose means the next run resumes for free.
+                rate_limited = True
+                console.print(f"[yellow]Blogger rate limit reached, stopping run:[/] {exc}")
+                break
             except RuntimeError as exc:
+                publish_failures += 1
                 console.print(f"[red]Failed to publish {title}:[/] {exc}")
                 continue
 
@@ -408,18 +451,30 @@ def an1_sync(
                 blogger_url=result.get("url"),
                 status="DRAFT" if is_draft else "LIVE",
             )
+            # The post is out; its cached prose has done its job and can be dropped.
+            history.discard_cached_prose(post.post_id, post.version)
             published_count += 1
             console.print(f"[green]{action}:[/] {title} -> {result.get('url', 'n/a')}")
 
+    # Anything that did not publish is still absent from the ledger and, when it already
+    # has prose, still in the cache - so it costs the next run a publish and nothing more.
+    retryable = len(eligible) - published_count
+
     notes: list[str] = []
+    if rate_limited:
+        notes.append("Blogger rate limit reached")
     if quota_exhausted:
         notes.append("Gemini quota exhausted")
+    if publish_failures:
+        notes.append(f"{publish_failures} failed to publish")
     if deferred_count:
-        notes.append(f"{deferred_count} deferred to the next run")
+        notes.append(f"{deferred_count} deferred")
     if generation_failures:
         notes.append(f"{generation_failures} skipped after generation errors")
     if scrape_failures:
         notes.append(f"{scrape_failures} skipped after scrape errors")
+    if retryable > 0:
+        notes.append(f"{retryable} retried on the next run")
 
     if published_count:
         summary = f"Successfully processed {published_count} AN1 post(s)."
@@ -428,14 +483,15 @@ def an1_sync(
         console.print(Panel(summary, style="green"))
         return
 
-    if quota_exhausted or deferred_count:
-        # Nothing was published, but nothing was lost either: the unpublished posts are
-        # still absent from the ledger, so the next scheduled run picks them up. Exit 0 so
-        # a spent quota does not surface as a broken pipeline.
+    if rate_limited or quota_exhausted or deferred_count or publish_failures:
+        # Nothing published, but nothing lost either. Exit 0: a spent quota or a rate limit
+        # is a pause, not a broken pipeline, and failing the run would only mean an alert
+        # for work the next scheduled run completes on its own.
         console.print(
             Panel(
-                f"No posts published. {len(eligible)} eligible post(s) remain in the backlog and "
+                f"No posts published. {retryable} eligible post(s) remain in the backlog and "
                 "will be retried on the next run."
+                + (" Blogger is rate limiting writes for now." if rate_limited else "")
                 + (" Gemini quota is exhausted for now." if quota_exhausted else ""),
                 title="Deferred",
                 style="yellow",

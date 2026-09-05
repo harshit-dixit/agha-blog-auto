@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.catalog import Topic, TopicCatalog
@@ -38,7 +38,30 @@ CREATE TABLE IF NOT EXISTS an1_posts (
     status TEXT NOT NULL,
     UNIQUE(post_id, version)
 );
+
+CREATE TABLE IF NOT EXISTS an1_prose_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    prose_html TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(post_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_an1_prose_lookup ON an1_prose_cache(post_id, version);
 """
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse an ISO timestamp for TTL comparison.
+
+    An unparseable or naive value is treated as expired rather than kept forever - the
+    only cost of dropping a cache entry is regenerating its prose.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @dataclass
@@ -72,10 +95,18 @@ class AN1PublishedPost:
 class HistoryDB:
     """SQLite-backed publication ledger used for duplicate detection and topic rotation."""
 
-    def __init__(self, db_path: Path, json_tracker_path: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path,
+        json_tracker_path: Path | None = None,
+        prose_cache_path: Path | None = None,
+        prose_cache_ttl_days: int = 14,
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.json_tracker_path = json_tracker_path or (self.db_path.parent / "an1_published.json")
+        self.prose_cache_path = prose_cache_path or (self.db_path.parent / "an1_prose_cache.json")
+        self.prose_cache_ttl_days = prose_cache_ttl_days
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             # Automatic migration for existing DBs
@@ -85,6 +116,7 @@ class HistoryDB:
                 conn.execute("ALTER TABLE an1_posts ADD COLUMN version TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_an1_posts_lookup ON an1_posts(post_id, version)")
         self._sync_from_json_tracker()
+        self._sync_from_prose_cache()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -282,6 +314,130 @@ class HistoryDB:
         ]
         self.json_tracker_path.parent.mkdir(parents=True, exist_ok=True)
         self.json_tracker_path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Generated-prose cache
+    #
+    # Gemini's free tier bills a per-day request count, so prose that was generated but
+    # never published - a post that hit a Blogger 429, say - must not be regenerated on
+    # the next run. Cached entries are keyed by (post_id, version) and dropped once the
+    # post publishes, so the cache only ever holds the in-flight backlog.
+    # ------------------------------------------------------------------
+
+    def _sync_from_prose_cache(self) -> None:
+        """Seed the prose cache table from its JSON file, skipping stale entries.
+
+        Like the publication ledger, the SQLite file is disposable in CI and rebuilt from
+        JSON each run. A corrupt cache is recoverable (worst case the prose is generated
+        again), so it is dropped with a warning rather than failing the run.
+        """
+        if not self.prose_cache_path.exists():
+            return
+        try:
+            content = self.prose_cache_path.read_text(encoding="utf-8")
+            if not content.strip():
+                return
+            data = json.loads(content)
+            if not isinstance(data, list):
+                raise ValueError(f"Expected list, got {type(data).__name__}")
+        except Exception:
+            return
+
+        cutoff = datetime.now(UTC) - timedelta(days=self.prose_cache_ttl_days)
+        with self._connect() as conn:
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                post_id = item.get("post_id")
+                prose_html = item.get("prose_html")
+                created_at = item.get("created_at") or datetime.now(UTC).isoformat()
+                if not post_id or not prose_html:
+                    continue
+                if _parse_timestamp(created_at) < cutoff:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO an1_prose_cache
+                        (post_id, version, prose_html, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (post_id, item.get("version", ""), prose_html, created_at),
+                )
+
+    def _save_prose_cache(self) -> None:
+        """Export the prose cache to JSON so it survives the next CI run."""
+        cutoff = (datetime.now(UTC) - timedelta(days=self.prose_cache_ttl_days)).isoformat()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM an1_prose_cache WHERE created_at < ?", (cutoff,))
+            rows = conn.execute(
+                "SELECT post_id, version, prose_html, created_at FROM an1_prose_cache "
+                "ORDER BY created_at"
+            ).fetchall()
+        serialized = [
+            {
+                "post_id": r["post_id"],
+                "version": r["version"],
+                "prose_html": r["prose_html"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+        self.prose_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.prose_cache_path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+
+    def get_cached_prose(self, post_id: str, version: str = "") -> str | None:
+        """Return previously generated prose for this exact (post_id, version), if any."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT prose_html FROM an1_prose_cache WHERE post_id = ? AND version = ?",
+                (post_id, version or ""),
+            ).fetchone()
+        return row["prose_html"] if row else None
+
+    def cache_prose(self, post_id: str, version: str, prose_html: str) -> None:
+        """Store generated prose so a failed publish does not cost a second Gemini call."""
+        if not prose_html:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO an1_prose_cache (post_id, version, prose_html, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(post_id, version) DO UPDATE SET
+                    prose_html = excluded.prose_html,
+                    created_at = excluded.created_at
+                """,
+                (post_id, version or "", prose_html, datetime.now(UTC).isoformat()),
+            )
+        self._save_prose_cache()
+
+    def cache_prose_many(self, entries: Sequence[tuple[str, str, str]]) -> None:
+        """Cache a whole batch of (post_id, version, prose_html) in one JSON rewrite."""
+        rows = [(pid, ver or "", html) for pid, ver, html in entries if html]
+        if not rows:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO an1_prose_cache (post_id, version, prose_html, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(post_id, version) DO UPDATE SET
+                    prose_html = excluded.prose_html,
+                    created_at = excluded.created_at
+                """,
+                [(pid, ver, html, now) for pid, ver, html in rows],
+            )
+        self._save_prose_cache()
+
+    def discard_cached_prose(self, post_id: str, version: str = "") -> None:
+        """Drop a cache entry once its post is published and the prose is no longer needed."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM an1_prose_cache WHERE post_id = ? AND version = ?",
+                (post_id, version or ""),
+            )
+        self._save_prose_cache()
 
     def is_an1_published(self, post_id: str, version: str | None = None) -> bool:
         """Check if an AN1 post ID (or specific version) has already been published."""

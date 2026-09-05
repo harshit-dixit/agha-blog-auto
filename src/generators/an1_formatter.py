@@ -62,8 +62,8 @@ INSTRUCTIONS:
 5. Ensure the text is 100% original and natural (not a regurgitation of the scraped summary)."""
 
 # Reviews for several posts in one request. The free tier's binding limit is a per-day
-# request count (20/day/model), not a per-minute rate, so how many calls a run makes
-# matters far more than how fast it makes them.
+# request count (200/day on Flash-Lite, 20/day on Flash), not a per-minute rate, so how
+# many calls a run makes matters more than how fast it makes them.
 GEMINI_BATCH_PROMPT = """You are a senior gaming journalist and app reviewer for Android Game Hack Area.
 Write an original app review for EACH of the {count} Android games listed below.
 
